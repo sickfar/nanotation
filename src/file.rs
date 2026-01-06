@@ -6,10 +6,17 @@ use std::io;
 pub fn detect_comment_style(path: &str) -> String {
     let ext = path.split('.').last().unwrap_or("");
     match ext {
-        "rs" | "go" | "java" | "kt" | "js" | "ts" | "c" | "cpp" | "h" => "//",
-        "py" | "sh" | "rb" => "#",
+        "rs" | "go" | "java" | "kt" | "js" | "ts" | "c" | "cpp" | "h" | "cs" | "php" | "scala" | "dart" | "swift" => "//",
+        "py" | "sh" | "rb" | "yaml" | "yml" | "toml" | "pl" | "r" | "dockerfile" => "#",
+        "sql" | "lua" | "hs" | "ada" => "--",
         "md" => "",
-        _ => "//",
+        _ => {
+            if path.ends_with("Dockerfile") {
+                "#"
+            } else {
+                "//"
+            }
+        },
     }.to_string()
 }
 
@@ -108,6 +115,28 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_comment_style_sql() {
+        assert_eq!(detect_comment_style("query.sql"), "--");
+    }
+
+    #[test]
+    fn test_detect_comment_style_docker() {
+        assert_eq!(detect_comment_style("Dockerfile"), "#");
+        assert_eq!(detect_comment_style("dev.dockerfile"), "#");
+    }
+
+    #[test]
+    fn test_detect_comment_style_config() {
+        assert_eq!(detect_comment_style("config.yaml"), "#");
+        assert_eq!(detect_comment_style("Cargo.toml"), "#");
+    }
+
+    #[test]
+    fn test_detect_comment_style_swift() {
+        assert_eq!(detect_comment_style("App.swift"), "//");
+    }
+
+    #[test]
     fn test_parse_file_without_annotations() {
         let content = "fn main() {\n    println!(\"Hello\");\n}";
         let lines = parse_file(content, "//");
@@ -135,8 +164,6 @@ mod tests {
 
     #[test]
     fn test_parse_save_roundtrip() {
-        use std::fs;
-        
         let temp_path = "/tmp/test_nanotation_roundtrip.txt";
         let original_content = "// [ANNOTATION] Test annotation\nlet x = 5;\nlet y = 10;";
         

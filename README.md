@@ -109,8 +109,9 @@ The annotations will be preserved in the file and can be viewed/edited in subseq
 
 The editor automatically detects and uses appropriate comment styles:
 
-- **C-style (`//`)**: Rust, Go, Java, Kotlin, JavaScript, TypeScript, C, C++
-- **Hash (`#`)**: Python, Shell, Ruby
+- **C-style (`//`)**: Rust, Go, Java, Kotlin, JS/TS, C/C++, C#, Swift, PHP, Scala, Dart
+- **Hash (`#`)**: Python, Ruby, Shell, YAML, TOML, Dockerfile, Perl, R
+- **Double Dash (`--`)**: SQL, Lua, Haskell, Ada
 - **Plain**: Markdown (no comment prefix)
 
 ## Project Structure

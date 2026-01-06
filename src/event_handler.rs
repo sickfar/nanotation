@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 use crate::models::{Line, Mode, Action};
 use crate::text::wrap_text;
 use crossterm::{
@@ -403,12 +404,13 @@ fn next_search_match(
     current_match: &mut Option<usize>,
     cursor_line: &mut usize,
 ) {
+    if search_matches.is_empty() {
+        return;
+    }
     if let Some(idx) = *current_match {
-        if !search_matches.is_empty() {
-            let next = (idx + 1) % search_matches.len();
-            *current_match = Some(next);
-            *cursor_line = search_matches[next];
-        }
+        let next = (idx + 1) % search_matches.len();
+        *current_match = Some(next);
+        *cursor_line = search_matches[next];
     }
 }
 
