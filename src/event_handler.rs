@@ -31,6 +31,18 @@ pub fn handle_normal_mode(
                 *modified = true;
             }
         }
+        (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => {
+            let (_, height) = terminal::size()?;
+            *cursor_line = cursor_line.saturating_sub((height - 5) as usize);
+            *annotation_scroll = 0;
+            adjust_scroll(*cursor_line, scroll_offset, lines)?;
+        }
+        (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => {
+            let (_, height) = terminal::size()?;
+            *cursor_line = (*cursor_line + (height - 5) as usize).min(lines.len() - 1);
+            *annotation_scroll = 0;
+            adjust_scroll(*cursor_line, scroll_offset, lines)?;
+        }
         (KeyCode::Up, _) => {
             if *cursor_line > 0 {
                 *cursor_line -= 1;
@@ -44,18 +56,6 @@ pub fn handle_normal_mode(
                 *annotation_scroll = 0;
                 adjust_scroll(*cursor_line, scroll_offset, lines)?;
             }
-        }
-        (KeyCode::PageUp, _) => {
-            let (_, height) = terminal::size()?;
-            *cursor_line = cursor_line.saturating_sub((height - 5) as usize);
-            *annotation_scroll = 0;
-            adjust_scroll(*cursor_line, scroll_offset, lines)?;
-        }
-        (KeyCode::PageDown, _) => {
-            let (_, height) = terminal::size()?;
-            *cursor_line = (*cursor_line + (height - 5) as usize).min(lines.len() - 1);
-            *annotation_scroll = 0;
-            adjust_scroll(*cursor_line, scroll_offset, lines)?;
         }
         (KeyCode::Enter, _) => {
             let existing = lines[*cursor_line].annotation.clone().unwrap_or_default();

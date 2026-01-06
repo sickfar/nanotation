@@ -60,7 +60,7 @@ nanotation --help
 | `Enter` | Add/edit annotation for current line |
 | `↑` / `↓` | Navigate up/down (when editing annotation: move cursor through wrapped lines) |
 | `←` / `→` | When editing annotation: move cursor left/right |
-| `PgUp` / `PgDn` | Page navigation |
+| `PgUp` / `PgDn` <br> `Alt+↑` / `Alt+↓` | Page navigation |
 | `Esc` | Cancel annotation/search mode |
 
 

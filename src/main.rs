@@ -23,7 +23,7 @@ fn main() -> io::Result<()> {
         println!("  ^D        Delete annotation");
         println!("  Enter     Add/edit annotation");
         println!("  ↑↓        Navigate lines");
-        println!("  PgUp/PgDn Page navigation");
+        println!("  PgUp/PgDn (Alt+↑/↓) Page navigation");
         return Ok(());
     }
 
