@@ -21,11 +21,18 @@ Small annotation editor for fast review process in Claude Code and similar conso
 
 ## Installation
 
-Ensure you have Rust installed. Clone the repository and build:
 
-```bash
-cargo build --release
-```
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/sickfar/nanotation.git
+   cd nanotation
+   ```
+
+2. **Install locally**:
+   ```bash
+   cargo install --path .
+   ```
+   This will install the binary `nanot` to your Cargo bin directory (usually `~/.cargo/bin`). Ensure this directory is in your `PATH`.
 
 ## Usage
 
@@ -83,7 +90,7 @@ For Markdown files (no comment prefix):
 
 1. **Open a file for review**:
    ```bash
-   nanotation src/lib.rs
+   nanot src/lib.rs
    ```
 
 2. **Navigate to the line** you want to annotate using arrow keys
