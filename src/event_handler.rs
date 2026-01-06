@@ -35,27 +35,27 @@ pub fn handle_normal_mode(
             if *cursor_line > 0 {
                 *cursor_line -= 1;
                 *annotation_scroll = 0;
-                adjust_scroll(*cursor_line, scroll_offset)?;
+                adjust_scroll(*cursor_line, scroll_offset, lines)?;
             }
         }
         (KeyCode::Down, _) => {
             if *cursor_line < lines.len() - 1 {
                 *cursor_line += 1;
                 *annotation_scroll = 0;
-                adjust_scroll(*cursor_line, scroll_offset)?;
+                adjust_scroll(*cursor_line, scroll_offset, lines)?;
             }
         }
         (KeyCode::PageUp, _) => {
             let (_, height) = terminal::size()?;
-            *cursor_line = cursor_line.saturating_sub((height - 6) as usize);
+            *cursor_line = cursor_line.saturating_sub((height - 5) as usize);
             *annotation_scroll = 0;
-            adjust_scroll(*cursor_line, scroll_offset)?;
+            adjust_scroll(*cursor_line, scroll_offset, lines)?;
         }
         (KeyCode::PageDown, _) => {
             let (_, height) = terminal::size()?;
-            *cursor_line = (*cursor_line + (height - 6) as usize).min(lines.len() - 1);
+            *cursor_line = (*cursor_line + (height - 5) as usize).min(lines.len() - 1);
             *annotation_scroll = 0;
-            adjust_scroll(*cursor_line, scroll_offset)?;
+            adjust_scroll(*cursor_line, scroll_offset, lines)?;
         }
         (KeyCode::Enter, _) => {
             let existing = lines[*cursor_line].annotation.clone().unwrap_or_default();
@@ -148,7 +148,7 @@ pub fn handle_search_mode(
         KeyCode::Enter => {
             if !search_matches.is_empty() {
                 next_search_match(search_matches, current_match, cursor_line);
-                adjust_scroll(*cursor_line, scroll_offset)?;
+                adjust_scroll(*cursor_line, scroll_offset, lines)?;
             }
         }
         KeyCode::Esc => {
@@ -160,14 +160,14 @@ pub fn handle_search_mode(
             query.insert(*cursor_pos, c);
             *cursor_pos += 1;
             perform_search(query, lines, search_matches, current_match, cursor_line);
-            adjust_scroll(*cursor_line, scroll_offset)?;
+            adjust_scroll(*cursor_line, scroll_offset, lines)?;
         }
         KeyCode::Backspace => {
             if *cursor_pos > 0 {
                 *cursor_pos -= 1;
                 query.remove(*cursor_pos);
                 perform_search(query, lines, search_matches, current_match, cursor_line);
-                adjust_scroll(*cursor_line, scroll_offset)?;
+                adjust_scroll(*cursor_line, scroll_offset, lines)?;
             }
         }
         _ => {}
@@ -326,15 +326,32 @@ fn next_search_match(
     }
 }
 
-fn adjust_scroll(cursor_line: usize, scroll_offset: &mut usize) -> io::Result<()> {
-    let (_, height) = terminal::size().unwrap_or((80, 24));
-    let content_height = (height - 6) as usize;
+fn adjust_scroll(cursor_line: usize, scroll_offset: &mut usize, lines: &[Line]) -> io::Result<()> {
+    let (width, height) = terminal::size().unwrap_or((80, 24));
+    let content_height = (height - 5) as usize;
 
     if cursor_line < *scroll_offset {
         *scroll_offset = cursor_line;
-    } else if cursor_line >= *scroll_offset + content_height {
-        *scroll_offset = cursor_line - content_height + 1;
     }
+
+    let mut visual_lines = 0;
+    for i in *scroll_offset..=cursor_line {
+        if i >= lines.len() { break; }
+        let wrapped = wrap_text(&lines[i].content, width as usize);
+        visual_lines += if wrapped.is_empty() { 1 } else { wrapped.len() };
+    }
+
+    while visual_lines > content_height {
+        if *scroll_offset >= cursor_line {
+            break;
+        }
+        let wrapped = wrap_text(&lines[*scroll_offset].content, width as usize);
+        let count = if wrapped.is_empty() { 1 } else { wrapped.len() };
+        
+        *scroll_offset += 1;
+        visual_lines = visual_lines.saturating_sub(count);
+    }
+
     Ok(())
 }
 

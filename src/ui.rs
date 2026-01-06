@@ -23,8 +23,8 @@ pub fn render(
     annotation_scroll: usize,
 ) -> io::Result<()> {
     let (width, height) = terminal::size()?;
-    // Reserve 6 lines at bottom: 4 for annotation area (border + 2 text lines + border) + 1 for status bar + 1 spacing
-    let content_height = (height - 6) as usize;
+    // Reserve 5 lines at bottom: 4 for annotation area (border + 2 text lines + border) + 1 for status bar
+    let content_height = (height - 5) as usize;
     let colors = theme.colors();
 
     let mut stdout = io::stdout();
@@ -248,7 +248,7 @@ fn render_status_bar(
         MoveTo(0, height - 1),
         SetBackgroundColor(colors.status_bg),
         SetForegroundColor(colors.status_fg),
-        Print(format!("{:width$}", status, width = width as usize)),
+        Print(format!("{:width$}", status.chars().take(width as usize - 1).collect::<String>(), width = width as usize - 1)),
         ResetColor
     )?;
 
