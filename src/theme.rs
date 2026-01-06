@@ -9,7 +9,7 @@ pub enum Theme {
 #[derive(Clone, Copy)]
 pub struct ColorScheme {
     pub bg: Color,
-    pub fg: Color,
+    pub _fg: Color,
     pub selected_bg: Color,
     pub annotated_bg: Color,
     pub annotated_selected_bg: Color,
@@ -24,7 +24,7 @@ impl Theme {
         match self {
             Theme::Dark => ColorScheme {
                 bg: Color::Black,
-                fg: Color::White,
+                _fg: Color::White,
                 selected_bg: Color::DarkGrey,
                 annotated_bg: Color::Rgb { r: 40, g: 60, b: 80 },
                 annotated_selected_bg: Color::Rgb { r: 60, g: 90, b: 120 },
@@ -35,7 +35,7 @@ impl Theme {
             },
             Theme::Light => ColorScheme {
                 bg: Color::White,
-                fg: Color::Black,
+                _fg: Color::Black,
                 selected_bg: Color::Rgb { r: 220, g: 220, b: 220 },
                 annotated_bg: Color::Rgb { r: 200, g: 220, b: 240 },
                 annotated_selected_bg: Color::Rgb { r: 170, g: 200, b: 230 },
@@ -57,7 +57,7 @@ mod tests {
         let theme = Theme::Dark;
         let colors = theme.colors();
         assert_eq!(colors.bg, Color::Black);
-        assert_eq!(colors.fg, Color::White);
+        assert_eq!(colors._fg, Color::White);
         assert_eq!(colors.status_bg, Color::DarkGrey);
     }
 
@@ -66,6 +66,6 @@ mod tests {
         let theme = Theme::Light;
         let colors = theme.colors();
         assert_eq!(colors.bg, Color::White);
-        assert_eq!(colors.fg, Color::Black);
+        assert_eq!(colors._fg, Color::Black);
     }
 }

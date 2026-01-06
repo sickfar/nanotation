@@ -1,13 +1,17 @@
 use crate::models::{Line, Mode};
-use crate::text::wrap_text;
+use crate::text::{wrap_text, wrap_styled_text};
 use crate::theme::{ColorScheme, Theme};
+use crate::highlighting::{SyntaxHighlighter, to_crossterm_color};
+use syntect::highlighting::FontStyle;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     queue,
-    style::{Print, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType},
+    style::{Print, ResetColor, SetBackgroundColor, SetForegroundColor, SetAttribute, Attribute},
+    terminal::{self},
 };
 use std::io::{self, Write};
+use std::path::Path;
+use unicode_width::UnicodeWidthStr;
 
 /// Renders the editor UI to the terminal.
 pub fn render(
@@ -21,6 +25,7 @@ pub fn render(
     search_matches: &[usize],
     current_match: Option<usize>,
     annotation_scroll: usize,
+    highlighter: &SyntaxHighlighter,
 ) -> io::Result<()> {
     let (width, height) = terminal::size()?;
     // Reserve 5 lines at bottom: 4 for annotation area (border + 2 text lines + border) + 1 for status bar
@@ -28,7 +33,7 @@ pub fn render(
     let colors = theme.colors();
 
     let mut stdout = io::stdout();
-    queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+    queue!(stdout, MoveTo(0, 0))?;
 
     let gutter_width = lines.len().to_string().len() + 2; // + padding
     let content_width = (width as usize).saturating_sub(gutter_width);
@@ -54,11 +59,36 @@ pub fn render(
             colors.bg
         };
 
-        let wrapped = wrap_text(&line.content, content_width);
-        // Force at least one line if empty, to show line number
-        let wrapped = if wrapped.is_empty() { vec![String::new()] } else { wrapped };
+        // Determine extension
+        let extension = file_path.as_deref()
+            .map(|p| Path::new(p).extension().and_then(|e| e.to_str()).unwrap_or("txt"))
+            .unwrap_or("txt");
 
-        for (i, wrapped_line) in wrapped.iter().enumerate() {
+        // Highlight
+        let styled_spans = highlighter.highlight(&line.content, extension);
+        
+        // Wrap styled
+        let wrapped_styled = wrap_styled_text(&styled_spans, content_width);
+        
+        let wrapped_styled = if wrapped_styled.is_empty() { 
+             // Logic to handle empty line styling if needed, or just empty vector means empty line
+             if line.content.is_empty() {
+                 vec![vec![]]
+             } else {
+                 wrapped_styled
+             }
+        } else { 
+            wrapped_styled 
+        };
+        
+        // If it's truly empty (vec![vec![]]), we loop once with empty segments
+        // The loop `for (i, wrapped_line_segments) in wrapped_styled.iter().enumerate()`
+        // If it's `vec![vec![]]`, it iterates once. `wrapped_line_segments` is empty vec.
+        // `for (style, text) in wrapped_line_segments` does nothing. 
+        // Padding is calculated as `content_width`. Spaces are printed.
+        // This is correct.
+
+        for (i, wrapped_line_segments) in wrapped_styled.iter().enumerate() {
             if screen_line >= content_height {
                 break;
             }
@@ -69,26 +99,53 @@ pub fn render(
             } else {
                 format!("{:>width$} ", " ", width = gutter_width - 1)
             };
-
-            // Calculate colors
-            // Gutter usually has different color or just bg
-            // We use status_fg/bg for gutter or similar? Or just plain.
-            // Let's use status color for gutter to distinguish it.
             
             queue!(
                 stdout,
                 MoveTo(0, screen_line as u16),
-                // Draw gutter
-                SetBackgroundColor(colors.bg), // or status_bg?
-                SetForegroundColor(colors.status_fg), // Dimmer?
+                SetBackgroundColor(colors.bg),
+                SetForegroundColor(colors.status_fg),
                 Print(line_num_str),
-                
-                // Draw content
                 SetBackgroundColor(bg_color),
-                SetForegroundColor(colors.fg),
-                Print(format!("{:width$}", wrapped_line, width = content_width)),
-                ResetColor
             )?;
+            
+            // Draw segments
+            let mut current_line_width = 0;
+            for (style, text) in wrapped_line_segments {
+                let fg = to_crossterm_color(style.foreground);
+                
+                // Reset everything to handle any lingering state safely, then re-apply BG
+                queue!(stdout, SetAttribute(Attribute::Reset))?;
+                queue!(stdout, SetBackgroundColor(bg_color))?;
+                
+                // Font styles
+                if style.font_style.contains(FontStyle::BOLD) {
+                    queue!(stdout, SetAttribute(Attribute::Bold))?;
+                }
+                if style.font_style.contains(FontStyle::ITALIC) {
+                    queue!(stdout, SetAttribute(Attribute::Italic))?;
+                }
+                if style.font_style.contains(FontStyle::UNDERLINE) {
+                    queue!(stdout, SetAttribute(Attribute::Underlined))?;
+                }
+
+                queue!(stdout, SetForegroundColor(fg), Print(text))?;
+                
+                current_line_width += text.width();
+            }
+            
+            // Fill padding
+            // We need to ensure we are in correct BG state for padding
+            // The last segment left us with bg_color set, but attributes might be set.
+            queue!(stdout, SetAttribute(Attribute::Reset))?;
+            queue!(stdout, SetBackgroundColor(bg_color))?;
+            
+            let padding = content_width.saturating_sub(current_line_width);
+            if padding > 0 {
+                queue!(stdout, Print(format!("{:width$}", "", width = padding)))?;
+            }
+            
+            queue!(stdout, ResetColor)?;
             screen_line += 1;
         }
 

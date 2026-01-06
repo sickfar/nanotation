@@ -5,6 +5,7 @@ mod file;
 mod ui;
 mod event_handler;
 mod editor;
+mod highlighting;
 
 use editor::Editor;
 use std::io;

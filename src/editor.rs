@@ -26,6 +26,7 @@ pub struct Editor {
     pub annotation_scroll: usize,
     pub history: Vec<crate::models::Action>,
     pub history_index: usize,
+    pub highlighter: crate::highlighting::SyntaxHighlighter,
 }
 
 impl Editor {
@@ -33,6 +34,8 @@ impl Editor {
         let content = fs::read_to_string(&file_path)?;
         let lang_comment = file::detect_comment_style(&file_path);
         let lines = file::parse_file(&content, &lang_comment);
+        let theme = Theme::Dark;
+        let highlighter = crate::highlighting::SyntaxHighlighter::new(matches!(theme, Theme::Dark));
 
         Ok(Editor {
             lines,
@@ -41,13 +44,14 @@ impl Editor {
             mode: Mode::Normal,
             file_path: Some(file_path),
             modified: false,
-            theme: Theme::Dark,
+            theme,
             lang_comment,
             search_matches: Vec::new(),
             current_match: None,
             annotation_scroll: 0,
             history: Vec::new(),
             history_index: 0,
+            highlighter,
         })
     }
 
@@ -118,6 +122,7 @@ impl Editor {
                 &self.search_matches,
                 self.current_match,
                 self.annotation_scroll,
+                &self.highlighter,
             )?;
 
             if let Event::Key(key) = event::read()? {
@@ -134,6 +139,8 @@ impl Editor {
                             self.mode = Mode::Search { query: String::new(), cursor_pos: 0 };
                             continue;
                         }
+                        
+                        let current_theme_is_dark = matches!(self.theme, crate::theme::Theme::Dark);
                         
                         match event_handler::handle_normal_mode(
                             key,
@@ -157,7 +164,13 @@ impl Editor {
                             },
                             event_handler::NormalModeResult::Undo => self.undo(),
                             event_handler::NormalModeResult::Redo => self.redo(),
-                            event_handler::NormalModeResult::Continue => {},
+                            event_handler::NormalModeResult::Continue => {
+                                // Check if theme changed
+                                let new_theme_is_dark = matches!(self.theme, crate::theme::Theme::Dark);
+                                if current_theme_is_dark != new_theme_is_dark {
+                                    self.highlighter = crate::highlighting::SyntaxHighlighter::new(new_theme_is_dark);
+                                }
+                            },
                         }
                     }
                     Mode::Annotating { .. } => {
