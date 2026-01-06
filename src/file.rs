@@ -31,9 +31,18 @@ pub fn parse_file(content: &str, comment: &str) -> Vec<Line> {
     };
 
     let mut i = 0;
+    let mut in_code_block = false;
+    let is_markdown = comment.is_empty();
+
     while i < raw_lines.len() {
         let line = raw_lines[i];
-        if line.trim().starts_with(&annotation_marker) {
+        
+        // Handle code block toggling for markdown
+        if is_markdown && line.trim().starts_with("```") {
+            in_code_block = !in_code_block;
+        }
+
+        if !in_code_block && line.trim().starts_with(&annotation_marker) {
             let annotation_text = line.trim()
                 .strip_prefix(&annotation_marker)
                 .unwrap_or("")
@@ -49,8 +58,18 @@ pub fn parse_file(content: &str, comment: &str) -> Vec<Line> {
             } else {
                 lines.push(Line {
                     content: line.to_string(),
-                    annotation: None,
+                    annotation: None, // Or keep it as content? Logic below used None for end of file annotation mismatch
                 });
+                // Actually, looking at original logic:
+                // If it's the last line and looks like an annotation, it consumes it but with no attached content?
+                // Original: 
+                // lines.push(Line { content: line.to_string(), annotation: None }); 
+                // i += 1;
+                // Since this block is "if it STARTS with annotation marker", 
+                // The original logic for the `else` (last line) was: treat it as a normal line because it has no following line to attach to.
+                // But wait, the original logic for `else` was finding the marker, then pushing `line` as content.
+                // Meaning it WASN'T treated as an annotation if it was the last line?
+                // Let's stick to the original behavior for that edge case, but wrapped in `!in_code_block`.
                 i += 1;
             }
         } else {
@@ -188,5 +207,53 @@ mod tests {
         
         // Cleanup
         let _ = fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_parse_markdown_code_block() {
+        let content = "Normal text\n```\n[ANNOTATION] This should be ignored\n```\nTarget line";
+        let lines = parse_file(content, "");
+        
+        // Line 0: Normal text
+        assert_eq!(lines[0].content, "Normal text");
+        assert_eq!(lines[0].annotation, None);
+        
+        // Line 1: ```
+        assert_eq!(lines[1].content, "```");
+        assert_eq!(lines[1].annotation, None);
+        
+        // Line 2: [ANNOTATION] ... 
+        // Should be treated as content because it's in a code block
+        assert_eq!(lines[2].content, "[ANNOTATION] This should be ignored");
+        assert_eq!(lines[2].annotation, None);
+        
+        // Line 3: ```
+        assert_eq!(lines[3].content, "```");
+        
+        // Line 4: Target line
+        assert_eq!(lines[4].content, "Target line");
+    }
+
+    #[test]
+    fn test_parse_markdown_mixed() {
+        let content = "```\n[ANNOTATION] ignore me\n```\n[ANNOTATION] valid\nTarget";
+        let lines = parse_file(content, "");
+        
+        // Lines 0-2: code block
+        assert_eq!(lines[1].content, "[ANNOTATION] ignore me");
+        assert_eq!(lines[1].annotation, None);
+        
+        // Line 3 (was 4 in raw): Target with annotation
+        // "```" is line index 2.
+        // "[ANNOTATION] valid" is line index 3 (raw), but consumed.
+        // "Target" is line index 4 (raw).
+        // So lines vector:
+        // 0: ```
+        // 1: [ANNOTATION] ignore me
+        // 2: ```
+        // 3: Target (with annotation)
+        
+        assert_eq!(lines[3].content, "Target");
+        assert_eq!(lines[3].annotation, Some("valid".to_string()));
     }
 }
