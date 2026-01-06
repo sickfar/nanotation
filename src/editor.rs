@@ -24,31 +24,30 @@ pub struct Editor {
     pub search_matches: Vec<usize>,
     pub current_match: Option<usize>,
     pub annotation_scroll: usize,
+    pub history: Vec<crate::models::Action>,
+    pub history_index: usize,
 }
 
 impl Editor {
-    pub fn new(file_path: Option<String>) -> io::Result<Self> {
-        let (lines, lang_comment) = if let Some(ref path) = file_path {
-            let content = fs::read_to_string(path)?;
-            let comment = file::detect_comment_style(path);
-            let lines = file::parse_file(&content, &comment);
-            (lines, comment)
-        } else {
-            (vec![Line { content: String::new(), annotation: None }], "//".to_string())
-        };
+    pub fn new(file_path: String) -> io::Result<Self> {
+        let content = fs::read_to_string(&file_path)?;
+        let lang_comment = file::detect_comment_style(&file_path);
+        let lines = file::parse_file(&content, &lang_comment);
 
         Ok(Editor {
             lines,
             cursor_line: 0,
             scroll_offset: 0,
             mode: Mode::Normal,
-            file_path,
+            file_path: Some(file_path),
             modified: false,
             theme: Theme::Dark,
             lang_comment,
             search_matches: Vec::new(),
             current_match: None,
             annotation_scroll: 0,
+            history: Vec::new(),
+            history_index: 0,
         })
     }
 
@@ -58,6 +57,40 @@ impl Editor {
             self.modified = false;
         }
         Ok(())
+    }
+
+    pub fn perform_action(&mut self, action: crate::models::Action) {
+        // If we are not at the end of history, truncate
+        if self.history_index < self.history.len() {
+            self.history.truncate(self.history_index);
+        }
+        self.history.push(action);
+        self.history_index += 1;
+        self.modified = true;
+    }
+
+    pub fn undo(&mut self) {
+        if self.history_index > 0 {
+            self.history_index -= 1;
+            match &self.history[self.history_index] {
+                crate::models::Action::EditAnnotation { line_index, old_text, .. } => {
+                    self.lines[*line_index].annotation = old_text.clone();
+                }
+            }
+            self.modified = true;
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if self.history_index < self.history.len() {
+            match &self.history[self.history_index] {
+                crate::models::Action::EditAnnotation { line_index, new_text, .. } => {
+                    self.lines[*line_index].annotation = new_text.clone();
+                }
+            }
+            self.history_index += 1;
+            self.modified = true;
+        }
     }
 
     pub fn run(&mut self) -> io::Result<()> {
@@ -102,7 +135,7 @@ impl Editor {
                             continue;
                         }
                         
-                        if !event_handler::handle_normal_mode(
+                        match event_handler::handle_normal_mode(
                             key,
                             &mut self.lines,
                             &mut self.cursor_line,
@@ -112,14 +145,26 @@ impl Editor {
                             &mut self.annotation_scroll,
                             &mut self.scroll_offset,
                         )? {
-                            break;
+                            event_handler::NormalModeResult::Exit => break,
+                            event_handler::NormalModeResult::Action(action) => {
+                                // Apply and push history
+                                match &action {
+                                    crate::models::Action::EditAnnotation { line_index, new_text, .. } => {
+                                        self.lines[*line_index].annotation = new_text.clone();
+                                    }
+                                }
+                                self.perform_action(action);
+                            },
+                            event_handler::NormalModeResult::Undo => self.undo(),
+                            event_handler::NormalModeResult::Redo => self.redo(),
+                            event_handler::NormalModeResult::Continue => {},
                         }
                     }
                     Mode::Annotating { .. } => {
                         let Mode::Annotating { mut buffer, mut cursor_pos } = std::mem::replace(&mut self.mode, Mode::Normal) else {
                             unreachable!()
                         };
-                        event_handler::handle_annotation_mode(
+                        match event_handler::handle_annotation_mode(
                             key,
                             &mut buffer,
                             &mut cursor_pos,
@@ -128,9 +173,21 @@ impl Editor {
                             &mut self.mode,
                             &mut self.modified,
                             &mut self.annotation_scroll,
-                        )?;
-                        if matches!(self.mode, Mode::Normal) && key.code != KeyCode::Enter && key.code != KeyCode::Esc {
-                            self.mode = Mode::Annotating { buffer, cursor_pos };
+                        )? {
+                            Some(action) => {
+                                // Apply and push history
+                                match &action {
+                                    crate::models::Action::EditAnnotation { line_index, new_text, .. } => {
+                                        self.lines[*line_index].annotation = new_text.clone();
+                                    }
+                                }
+                                self.perform_action(action);
+                            },
+                            None => {
+                                if matches!(self.mode, Mode::Normal) && key.code != KeyCode::Enter && key.code != KeyCode::Esc {
+                                    self.mode = Mode::Annotating { buffer, cursor_pos };
+                                }
+                            }
                         }
                     }
                     Mode::Search { .. } => {
@@ -152,6 +209,25 @@ impl Editor {
                             self.mode = Mode::Search { query, cursor_pos };
                         }
                     }
+                    Mode::QuitPrompt => {
+                        match event_handler::handle_quit_prompt(key) {
+                            event_handler::QuitPromptResult::SaveAndExit => {
+                                self.save()?;
+                                break;
+                            }
+                            event_handler::QuitPromptResult::Exit => {
+                                break;
+                            }
+                            event_handler::QuitPromptResult::Cancel => {
+                                self.mode = Mode::Normal;
+                            }
+                            event_handler::QuitPromptResult::Continue => {}
+                        }
+                    }
+                    Mode::Help => {
+                        // Any key exits help
+                        self.mode = Mode::Normal;
+                    }
                 }
             }
         }
@@ -164,18 +240,18 @@ impl Editor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_editor_new_without_file() {
-        let editor = Editor::new(None).unwrap();
-        assert_eq!(editor.lines.len(), 1);
-        assert_eq!(editor.cursor_line, 0);
-        assert_eq!(editor.lang_comment, "//");
-        assert!(!editor.modified);
-    }
+
 
     #[test]
+
     fn test_search_functionality() {
-        let mut editor = Editor::new(None).unwrap();
+        // Create dummy file for test
+        let test_file = "test_search.txt";
+        std::fs::write(test_file, "content").unwrap();
+        
+        let mut editor = Editor::new(test_file.to_string()).unwrap();
+        std::fs::remove_file(test_file).unwrap(); // Cleanup
+        
         editor.lines = vec![
             Line { content: "hello world".to_string(), annotation: None },
             Line { content: "foo bar".to_string(), annotation: None },
@@ -208,7 +284,11 @@ mod tests {
 
     #[test]
     fn test_next_search_match_cycling() {
-        let mut editor = Editor::new(None).unwrap();
+        let test_file = "test_cycle.txt";
+        std::fs::write(test_file, "content").unwrap();
+        let mut editor = Editor::new(test_file.to_string()).unwrap();
+        std::fs::remove_file(test_file).unwrap();
+        
         editor.search_matches = vec![0, 2, 4];
         editor.current_match = Some(0);
         editor.cursor_line = 0;
@@ -248,5 +328,40 @@ mod tests {
 
         assert_eq!(editor.current_match, Some(0));
         assert_eq!(editor.cursor_line, 0);
+    }
+
+    #[test]
+    fn test_undo_redo() {
+        let test_file = "test_undo.txt";
+        std::fs::write(test_file, "line1\nline2").unwrap();
+        let mut editor = Editor::new(test_file.to_string()).unwrap();
+        std::fs::remove_file(test_file).unwrap();
+
+        // Initial state
+        assert_eq!(editor.lines[0].annotation, None);
+        // History initialized empty in new()
+
+        // Perform action: Add annotation
+        let action1 = crate::models::Action::EditAnnotation {
+            line_index: 0,
+            old_text: None,
+            new_text: Some("note1".to_string()),
+        };
+        editor.lines[0].annotation = Some("note1".to_string());
+        editor.perform_action(action1);
+
+        assert_eq!(editor.lines[0].annotation, Some("note1".to_string()));
+        assert_eq!(editor.history.len(), 1);
+        assert_eq!(editor.history_index, 1);
+
+        // Undo
+        editor.undo();
+        assert_eq!(editor.lines[0].annotation, None);
+        assert_eq!(editor.history_index, 0);
+
+        // Redo
+        editor.redo();
+        assert_eq!(editor.lines[0].annotation, Some("note1".to_string()));
+        assert_eq!(editor.history_index, 1);
     }
 }

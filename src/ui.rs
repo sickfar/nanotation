@@ -30,6 +30,9 @@ pub fn render(
     let mut stdout = io::stdout();
     queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
 
+    let gutter_width = lines.len().to_string().len() + 2; // + padding
+    let content_width = (width as usize).saturating_sub(gutter_width);
+
     let mut screen_line = 0;
     let mut line_idx = scroll_offset;
 
@@ -51,17 +54,39 @@ pub fn render(
             colors.bg
         };
 
-        let wrapped = wrap_text(&line.content, width as usize);
-        for wrapped_line in &wrapped {
+        let wrapped = wrap_text(&line.content, content_width);
+        // Force at least one line if empty, to show line number
+        let wrapped = if wrapped.is_empty() { vec![String::new()] } else { wrapped };
+
+        for (i, wrapped_line) in wrapped.iter().enumerate() {
             if screen_line >= content_height {
                 break;
             }
+            
+            // Gutter logic
+            let line_num_str = if i == 0 {
+                format!("{:>width$} ", line_idx + 1, width = gutter_width - 1)
+            } else {
+                format!("{:>width$} ", " ", width = gutter_width - 1)
+            };
+
+            // Calculate colors
+            // Gutter usually has different color or just bg
+            // We use status_fg/bg for gutter or similar? Or just plain.
+            // Let's use status color for gutter to distinguish it.
+            
             queue!(
                 stdout,
                 MoveTo(0, screen_line as u16),
+                // Draw gutter
+                SetBackgroundColor(colors.bg), // or status_bg?
+                SetForegroundColor(colors.status_fg), // Dimmer?
+                Print(line_num_str),
+                
+                // Draw content
                 SetBackgroundColor(bg_color),
                 SetForegroundColor(colors.fg),
-                Print(format!("{:width$}", wrapped_line, width = width as usize)),
+                Print(format!("{:width$}", wrapped_line, width = content_width)),
                 ResetColor
             )?;
             screen_line += 1;
@@ -110,6 +135,11 @@ pub fn render(
         width,
         height,
     )?;
+
+    match mode {
+        Mode::Help => render_help_overlay(&mut stdout, &colors, width, height)?,
+        _ => {},
+    }
 
     // Position and show cursor if in annotation edit mode
     let is_editing = matches!(mode, Mode::Annotating { .. });
@@ -227,7 +257,7 @@ fn render_status_bar(
         Mode::Normal => {
             let modified_flag = if modified { " [Modified]" } else { "" };
             let file = file_path.as_deref().unwrap_or("[No Name]");
-            format!(" {} | Line {}/{}{}  ^X Exit  ^O Save  ^W Search  ^T Theme  ^D Delete Annotation",
+            format!(" {} | Line {}/{}{}  ^G Help  ^X Exit  ^O Save  ^W Search  ^T Theme  ^D Del  ^N/^P Jump  ^Z/^Y Undo/Redo",
                 file, cursor_line + 1, total_lines, modified_flag)
         }
         Mode::Annotating { .. } => {
@@ -240,6 +270,12 @@ fn render_status_bar(
                 String::new()
             };
             format!(" Search: {}█{}  Enter: Next  Esc: Cancel", query, matches)
+        }
+        Mode::QuitPrompt => {
+            " Unsaved changes! Save before exiting? (y/n/Esc)".to_string()
+        }
+        Mode::Help => {
+            " Help Mode - Press any key to return".to_string()
         }
     };
 
@@ -315,6 +351,83 @@ fn position_cursor(
         MoveTo(cursor_x as u16, cursor_screen_line),
         Show
     )?;
+
+    Ok(())
+}
+
+fn render_help_overlay(
+    stdout: &mut impl Write,
+    colors: &ColorScheme,
+    width: u16,
+    height: u16,
+) -> io::Result<()> {
+    // Center the box
+    let box_width = 50;
+    let box_height = 18;
+    let start_x = (width.saturating_sub(box_width)) / 2;
+    let start_y = (height.saturating_sub(box_height)) / 2;
+
+    // Draw background
+    for y in 0..box_height {
+        if start_y + y >= height { break; }
+        queue!(
+            stdout,
+            MoveTo(start_x, start_y + y),
+            SetBackgroundColor(colors.annotation_window_bg),
+            SetForegroundColor(colors.annotation_window_fg),
+            Print(format!("{:width$}", " ", width = box_width as usize)),
+        )?;
+    }
+
+    // Border
+    queue!(
+        stdout,
+        MoveTo(start_x, start_y),
+        Print(format!("╔{}╗", "═".repeat(box_width as usize - 2))),
+        MoveTo(start_x, start_y + box_height - 1),
+        Print(format!("╚{}╝", "═".repeat(box_width as usize - 2))),
+    )?;
+    
+    for y in 1..box_height-1 {
+        queue!(
+            stdout,
+            MoveTo(start_x, start_y + y),
+            Print("║"),
+            MoveTo(start_x + box_width - 1, start_y + y),
+            Print("║"),
+        )?;
+    }
+
+    // Content
+    let commands = [
+        " HELP MENU ",
+        "",
+        " ^N / ^P    Next / Prev Annotation",
+        " ^D         Delete Annotation",
+        " Enter      Add / Edit Annotation",
+        " ^W         Search",
+        " ^T         Toggle Theme",
+        " ^O         Save File",
+        " ^X         Exit",
+        " ^G         Toggle Help",
+        "",
+        " Arrow Keys Navigation",
+        " PgUp/PgDn  Page Navigation",
+        " Alt+Up/Dn  Page Navigation",
+        "",
+        " Press Any Key to Close",
+    ];
+
+    for (i, cmd) in commands.iter().enumerate() {
+        if i as u16 >= box_height - 2 { break; }
+        queue!(
+            stdout,
+            MoveTo(start_x + 2, start_y + 1 + i as u16),
+            Print(cmd),
+        )?;
+    }
+    
+    queue!(stdout, ResetColor)?;
 
     Ok(())
 }

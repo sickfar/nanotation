@@ -8,59 +8,51 @@ Small annotation editor for fast review process in Claude Code and similar conso
 
 ## Features
 
-- **Inline Annotations**: Add review comments directly above code lines using the `[ANNOTATION]` marker
-- **Dedicated Annotation Area**: A dedicated 4-line display area above the status bar with 2 lines for text inside ASCII borders. Features a visible cursor and normal text editor navigation (←→ to move cursor, ↑↓ to navigate through wrapped lines) with automatic scrolling
-- **Multi-Language Support**: Automatically detects comment styles for various programming languages (Rust, Go, Java, Kotlin, JavaScript, Python, etc.)
-- **Visual Highlighting**: Annotated lines are highlighted with distinct colors for easy identification
-- **Theme Support**: Toggle between dark and light themes (`^T`)
-- **Search Functionality**: Full-text search with match navigation (`^W`)
-- **Text Wrapping**: Automatic line wrapping with indentation preservation
-- **Keyboard-Driven**: Efficient keyboard shortcuts for fast navigation and editing
-
+-   **Inline Annotations**: Add comments to any line without modifying the original file content structure (annotations are saved inline but managed differently in UI).
+-   **Keyboard Driven**: Efficient navigation and editing using standard and custom shortcuts.
+-   **Search Functionality**: Jump to text matches within the file.
+-   **Theme Toggling**: Switch between Light and Dark modes.
+-   **Syntax Highlighting**: Basic language detection for comment styles.
+-   **Line Numbers**: Clear context with line number gutter.
+-   **Help Overlay**: In-editor keybinding reference (`^G`).
+-   **Undo/Redo**: Safely revert annotation changes (`^Z`/`^Y`).
+-   **Unsaved Changes Protection**: Warnings on exit if work is not saved.
+-   **Quick Navigation**: Jump to next/previous annotation (`^N`/`^P`).
 
 ## Installation
 
-### From Source
+Ensure you have Rust installed. Clone the repository and build:
 
 ```bash
-git clone https://github.com/yourusername/nanotation.git
-cd nanotation
 cargo build --release
-```
-
-The binary will be available at `target/release/nanotation`.
-
-### Install Globally
-
-```bash
-cargo install --path .
 ```
 
 ## Usage
 
-### Basic Usage
-
 ```bash
-# Open an existing file
-nanotation src/main.rs
-
-# View help
-nanotation --help
+nanot <file>
 ```
+
+*Note: The file must exist.*
 
 ### Keyboard Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `^X` | Exit the editor |
-| `^O` | Save file |
-| `^W` | Search mode |
-| `^T` | Toggle theme (dark/light) |
-| `^D` | Delete annotation on current line |
-| `Enter` | Add/edit annotation for current line |
-| `↑` / `↓` | Navigate up/down (when editing annotation: move cursor through wrapped lines) |
-| `←` / `→` | When editing annotation: move cursor left/right |
-| `PgUp` / `PgDn` <br> `Alt+↑` / `Alt+↓` | Page navigation |
+| Key Combination | Action |
+| :--- | :--- |
+| `Ctrl` + `X` | Exit (prompts if unsaved changes) |
+| `Ctrl` + `O` | Save File |
+| `Ctrl` + `W` | Search |
+| `Ctrl` + `T` | Toggle Theme |
+| `Ctrl` + `G` | Toggle Help Overlay |
+| `Ctrl` + `Z` | Undo Annotation Edit |
+| `Ctrl` + `Y` | Redo Annotation Edit |
+| `Ctrl` + `D` | Delete Annotation on current line |
+| `Ctrl` + `N` | Jump to Next Annotation |
+| `Ctrl` + `P` | Jump to Previous Annotation |
+| `Enter` | Add/Edit Annotation on current line |
+| `Up` / `Down` | Navigate Lines |
+| `PgUp` / `PgDn` | Navigate Pages |
+| `Alt` + `Up` / `Down` | Navigate Pages |
 | `Esc` | Cancel annotation/search mode |
 
 

@@ -1,4 +1,4 @@
-use crate::models::{Line, Mode};
+use crate::models::{Line, Mode, Action};
 use crate::text::wrap_text;
 use crossterm::{
     event::{KeyCode, KeyEvent, KeyModifiers},
@@ -6,7 +6,15 @@ use crossterm::{
 };
 use std::io;
 
-/// Handles key events in normal mode. Returns false to exit the application.
+pub enum NormalModeResult {
+    Continue,
+    Exit,
+    Undo,
+    Redo,
+    Action(Action),
+}
+
+/// Handles key events in normal mode.
 pub fn handle_normal_mode(
     key: KeyEvent,
     lines: &mut [Line],
@@ -16,19 +24,61 @@ pub fn handle_normal_mode(
     modified: &mut bool,
     annotation_scroll: &mut usize,
     scroll_offset: &mut usize,
-) -> io::Result<bool> {
+) -> io::Result<NormalModeResult> {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('x'), KeyModifiers::CONTROL) => return Ok(false),
+        (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+            if *modified {
+                *mode = Mode::QuitPrompt;
+                return Ok(NormalModeResult::Continue); // Mode changed, just continue loop to handle prompt
+            } else {
+                return Ok(NormalModeResult::Exit);
+            }
+        }
         (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
             *theme = match *theme {
                 crate::theme::Theme::Dark => crate::theme::Theme::Light,
                 crate::theme::Theme::Light => crate::theme::Theme::Dark,
             };
         }
+        (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+            *mode = Mode::Help;
+        }
+        (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+            return Ok(NormalModeResult::Undo);
+        }
+        (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+            return Ok(NormalModeResult::Redo);
+        }
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-            if lines[*cursor_line].annotation.is_some() {
-                lines[*cursor_line].annotation = None;
-                *modified = true;
+            if let Some(old_text) = &lines[*cursor_line].annotation {
+                // Return Action instead of mutating directly
+                return Ok(NormalModeResult::Action(Action::EditAnnotation {
+                    line_index: *cursor_line,
+                    old_text: Some(old_text.clone()),
+                    new_text: None,
+                }));
+            }
+        }
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+            // Jump to next annotation
+            for i in (*cursor_line + 1)..lines.len() {
+                if lines[i].annotation.is_some() {
+                    *cursor_line = i;
+                    *annotation_scroll = 0;
+                    adjust_scroll(*cursor_line, scroll_offset, lines)?;
+                    break;
+                }
+            }
+        }
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+            // Jump to previous annotation
+            for i in (0..*cursor_line).rev() {
+                if lines[i].annotation.is_some() {
+                    *cursor_line = i;
+                    *annotation_scroll = 0;
+                    adjust_scroll(*cursor_line, scroll_offset, lines)?;
+                    break;
+                }
             }
         }
         (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => {
@@ -64,7 +114,7 @@ pub fn handle_normal_mode(
         }
         _ => {}
     }
-    Ok(true)
+    Ok(NormalModeResult::Continue)
 }
 
 /// Handles key events in annotation mode.
@@ -77,17 +127,37 @@ pub fn handle_annotation_mode(
     mode: &mut Mode,
     modified: &mut bool,
     annotation_scroll: &mut usize,
-) -> io::Result<()> {
+) -> io::Result<Option<Action>> {
     match key.code {
         KeyCode::Enter => {
-            if buffer.is_empty() {
-                lines[cursor_line].annotation = None;
+            let old_text = lines[cursor_line].annotation.clone();
+            let new_text = if buffer.is_empty() {
+                None
             } else {
-                lines[cursor_line].annotation = Some(buffer.clone());
+                Some(buffer.clone())
+            };
+
+            // Avoid action if nothing changed
+            if old_text != new_text {
+                // lines[cursor_line].annotation = new_text.clone(); // Don't mutate here if using perform_action
+                // But perform_action calls this? No, editor calls perform_action.
+                // We should return the action, and let Editor apply it.
+                // But for visual feedback we might want to apply it... 
+                // Actually Editor.perform_action will modify lines. So we shouldn't modify it here.
+                
+                *modified = true; // Editor.perform_action sets this too, but maybe redundant if we return Action.
+                *annotation_scroll = 0;
+                *mode = Mode::Normal;
+                
+                return Ok(Some(Action::EditAnnotation {
+                    line_index: cursor_line,
+                    old_text,
+                    new_text,
+                }));
+            } else {
+                 *annotation_scroll = 0;
+                 *mode = Mode::Normal;
             }
-            *modified = true;
-            *annotation_scroll = 0;
-            *mode = Mode::Normal;
         }
         KeyCode::Esc => {
             *annotation_scroll = 0;
@@ -129,7 +199,7 @@ pub fn handle_annotation_mode(
         }
         _ => {}
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Handles key events in search mode.
@@ -173,6 +243,22 @@ pub fn handle_search_mode(
         _ => {}
     }
     Ok(())
+}
+
+pub enum QuitPromptResult {
+    SaveAndExit,
+    Exit,
+    Cancel,
+    Continue,
+}
+
+pub fn handle_quit_prompt(key: KeyEvent) -> QuitPromptResult {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => QuitPromptResult::SaveAndExit,
+        KeyCode::Char('n') | KeyCode::Char('N') => QuitPromptResult::Exit,
+        KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => QuitPromptResult::Cancel,
+        _ => QuitPromptResult::Continue,
+    }
 }
 
 fn move_cursor_up(buffer: &str, cursor_pos: &mut usize, annotation_scroll: &mut usize) -> io::Result<()> {
@@ -402,45 +488,33 @@ fn adjust_annotation_scroll(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::wrap_text;
+    use crate::models::{Action, Line, Mode};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn test_adjust_annotation_scroll_basic() {
         let mut scroll = 0;
         // Text that will wrap at 10 chars (width 14 - 4)
         let text = "one two three four five six";
-        // "one two " (8 chars)
-        // "three four " (11 chars -> "three ")
-        // "four five " (10 chars)
-        // Expected wrap (approx):
-        // ["one two", "three four", "five six"]
+        let width: u16 = 14;
         
         // Line 0: "one two " (8 chars)
-        // Line 1: "three four " (11 chars)
-        // Line 2: "five six"
-        
-        // Force width to 14
-        let width: u16 = 14;
-        let max_width = width as usize - 4; // 10
-        let _wrapped = wrap_text(text, max_width);
-        
-        // Let's check where the lines wrap
-        // "one two" is 7 chars. Next word "three" (5 chars). 7 + 1 + 5 = 13 > 10.
-        // So:
-        // L0: "one two" (7)
-        // L1: "three four" (10)
-        // L2: "five six" (8)
-        
-        // Cursor at start (L0)
+        // Line 1: "three four " (11 chars -> "three ") -> "three four" is 10 chars.
+        // "one two" (7)
+        // "three four" (10)
+        // "five six" (8)
+
         adjust_annotation_scroll_with_width(text, 0, &mut scroll, width).unwrap();
         assert_eq!(scroll, 0);
         
-        // Cursor at end of L1 (pos 7 + 1 + 10 = 18)
+        // Cursor at end of L1 (pos 18)
         adjust_annotation_scroll_with_width(text, 18, &mut scroll, width).unwrap();
-        assert_eq!(scroll, 0); // Still visible (L0 and L1)
+        assert_eq!(scroll, 0); 
         
         // Cursor at start of L2 (pos 19)
         adjust_annotation_scroll_with_width(text, 19, &mut scroll, width).unwrap();
-        assert_eq!(scroll, 1); // Should scroll down
+        assert_eq!(scroll, 1); 
     }
 
     #[test]
@@ -448,6 +522,76 @@ mod tests {
         let mut scroll = 5;
         adjust_annotation_scroll_with_width("", 0, &mut scroll, 80).unwrap();
         assert_eq!(scroll, 0);
+    }
+
+    #[test]
+    fn test_jump_to_annotation() {
+        let mut lines = vec![
+            Line { content: "0".to_string(), annotation: None },
+            Line { content: "1".to_string(), annotation: Some("a1".to_string()) },
+            Line { content: "2".to_string(), annotation: None },
+            Line { content: "3".to_string(), annotation: Some("a2".to_string()) },
+            Line { content: "4".to_string(), annotation: None },
+        ];
+        
+        let mut cursor_line = 0;
+        let mut scroll_offset = 0;
+        let mut annotation_scroll = 0;
+        let mut mode = Mode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut modified = false;
+
+        // Jump Next (from 0 to 1)
+        let _ = handle_normal_mode(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &mut mode,
+            &mut theme,
+            &mut modified,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+        assert_eq!(cursor_line, 1);
+
+        // Jump Next (from 1 to 3)
+        let _ = handle_normal_mode(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &mut mode,
+            &mut theme,
+            &mut modified,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+        assert_eq!(cursor_line, 3);
+
+        // Jump Next (from 3 - no next)
+        let _ = handle_normal_mode(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &mut mode,
+            &mut theme,
+            &mut modified,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+        assert_eq!(cursor_line, 3);
+
+        // Jump Prev (from 3 to 1)
+        let _ = handle_normal_mode(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &mut mode,
+            &mut theme,
+            &mut modified,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+        assert_eq!(cursor_line, 1);
     }
 
     // Helper for testing with fixed width

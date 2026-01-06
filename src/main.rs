@@ -20,14 +20,29 @@ fn main() -> io::Result<()> {
         println!("  ^O        Save file");
         println!("  ^W        Search");
         println!("  ^T        Toggle theme");
+        println!("  ^G        Toggle Help Overlay");
         println!("  ^D        Delete annotation");
+        println!("  ^N        Next annotation");
+        println!("  ^P        Prev annotation");
         println!("  Enter     Add/edit annotation");
         println!("  ↑↓        Navigate lines");
         println!("  PgUp/PgDn (Alt+↑/↓) Page navigation");
         return Ok(());
     }
 
-    let file_path = args.get(1).cloned();
+    let file_path = if args.len() > 1 {
+        args[1].clone()
+    } else {
+        println!("Error: No file specified.");
+        println!("Usage: nanot <file>");
+        std::process::exit(1);
+    };
+
+    if !std::path::Path::new(&file_path).exists() {
+        println!("Error: File '{}' does not exist.", file_path);
+        std::process::exit(1);
+    }
+
     let mut editor = Editor::new(file_path)?;
     editor.run()?;
 
