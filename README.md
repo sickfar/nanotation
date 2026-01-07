@@ -24,6 +24,16 @@ Small annotation editor for fast review process in Claude Code and similar conso
 
 ## Installation
 
+### Homebrew (macOS & Linux)
+
+The easiest way to install `nanotation` is via Homebrew:
+
+```bash
+brew tap sickfar/nanotation
+brew install nanotation
+```
+
+### From Source
 
 1. **Clone the repository**:
    ```bash
