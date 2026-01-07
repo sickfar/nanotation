@@ -1,6 +1,7 @@
 # nanotation
 
 [![CI](https://github.com/sickfar/nanotation/actions/workflows/ci.yml/badge.svg)](https://github.com/sickfar/nanotation/actions/workflows/ci.yml)
+[![Homebrew](https://img.shields.io/github/v/release/sickfar/nanotation?label=homebrew&logo=homebrew)](https://github.com/sickfar/homebrew-nanotation)
 
 
 Small annotation editor for fast review process in Claude Code and similar console tools
