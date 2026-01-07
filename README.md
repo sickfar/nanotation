@@ -1,10 +1,13 @@
 # nanotation
 
+[![CI](https://github.com/sickfar/nanotation/actions/workflows/ci.yml/badge.svg)](https://github.com/sickfar/nanotation/actions/workflows/ci.yml)
+
+
 Small annotation editor for fast review process in Claude Code and similar console tools
 
 ## Overview
 
-`nanotation` is a lightweight, terminal-based text editor specifically designed for code reviews and annotation workflows. Inspired by `nano`, it provides a simple interface for adding inline review comments to any text file using the `[ANNOTATION]` marker format, making it perfect for asynchronous code reviews in AI-assisted development environments.
+`nanotation` is a lightweight, terminal-based text editor specifically designed for code reviews and annotation workflows. Inspired by `nano` and `Antigravity`, it provides a simple interface for adding inline review comments to any text file using the `[ANNOTATION]` marker format, making it perfect for asynchronous code reviews in AI-assisted development environments.
 
 ## Features
 
@@ -113,24 +116,6 @@ The editor automatically detects and uses appropriate comment styles:
 - **Hash (`#`)**: Python, Ruby, Shell, YAML, TOML, Dockerfile, Perl, R
 - **Double Dash (`--`)**: SQL, Lua, Haskell, Ada
 - **Plain**: Markdown (no comment prefix)
-
-## Project Structure
-
-The codebase is organized into focused modules for maintainability:
-
-```
-src/
-├── main.rs          - Entry point and CLI
-├── theme.rs         - Theme and color schemes
-├── models.rs        - Core data structures (Line, Mode)
-├── text.rs          - Text wrapping utilities
-├── file.rs          - File I/O and parsing
-├── ui.rs            - Terminal rendering
-├── event_handler.rs - Keyboard event handling
-└── editor.rs        - Main editor coordination
-```
-
-The project includes **18 unit tests** covering critical functionality like text wrapping, file parsing, comment detection, and search operations.
 
 ## Contributing
 
