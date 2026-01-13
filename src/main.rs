@@ -1,18 +1,22 @@
-mod theme;
-mod models;
-mod text;
-mod file;
-mod ui;
-mod event_handler;
+mod diff;
 mod editor;
+mod event_handler;
+mod file;
+mod git;
 mod highlighting;
+mod models;
+mod navigation;
+mod text;
+mod theme;
+mod ui;
+mod ui_diff;
 
 use editor::Editor;
 use std::io;
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    
+
     if args.len() > 1 && (args[1] == "-h" || args[1] == "--help") {
         println!("nanot - nano for annotations and code review");
         println!("\nUsage: nanot [file]");
@@ -22,6 +26,7 @@ fn main() -> io::Result<()> {
         println!("  ^W        Search");
         println!("  ^T        Toggle theme");
         println!("  ^G        Toggle Help Overlay");
+        println!("  ^K        Toggle diff view");
         println!("  ^D        Delete annotation");
         println!("  ^N        Next annotation");
         println!("  ^P        Prev annotation");

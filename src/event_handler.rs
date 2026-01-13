@@ -1,134 +1,221 @@
 #![allow(clippy::too_many_arguments)]
-use crate::models::{Line, Mode, Action};
-use crate::text::wrap_text;
+use crate::diff::adjust_diff_scroll;
+use crate::models::{Action, Line, ViewMode};
+use crate::navigation::{
+    adjust_annotation_scroll_pure, adjust_normal_scroll, find_matches, find_next_annotation,
+    find_prev_annotation, move_cursor_down_in_wrapped, move_cursor_up_in_wrapped,
+};
 use crossterm::{
     event::{KeyCode, KeyEvent, KeyModifiers},
     terminal,
 };
 use std::io;
 
-pub enum NormalModeResult {
+// ============================================================================
+// New Unified Architecture: IdleModeResult + handle_idle_mode
+// ============================================================================
+
+/// Result of handling key events in Idle state.
+/// Works the same regardless of ViewMode (Normal or Diff).
+#[allow(dead_code)]
+pub enum IdleModeResult {
+    /// Continue in current state
     Continue,
+    /// Exit the editor immediately (no unsaved changes)
     Exit,
+    /// Perform undo
     Undo,
+    /// Perform redo
     Redo,
+    /// An action was performed (e.g., delete annotation)
     Action(Action),
+    /// Enter annotation editing mode
+    EnterAnnotation { initial_text: String },
+    /// Enter search mode
+    EnterSearch,
+    /// Show help overlay
+    ShowHelp,
+    /// Show quit prompt (unsaved changes)
+    ShowQuitPrompt,
+    /// Toggle diff view mode
+    ToggleDiffView,
+    /// Exit diff view (only valid when in diff view mode)
+    ExitDiffView,
 }
 
-/// Handles key events in normal mode.
-pub fn handle_normal_mode(
+/// Handles key events in Idle state.
+/// This is the unified handler that works the same in both Normal and Diff view modes.
+/// The view_mode parameter is only used for scroll adjustment (diff needs synchronized scroll).
+pub fn handle_idle_mode(
     key: KeyEvent,
     lines: &mut [Line],
     cursor_line: &mut usize,
-    mode: &mut Mode,
+    view_mode: &ViewMode,
     theme: &mut crate::theme::Theme,
-    modified: &mut bool,
     annotation_scroll: &mut usize,
     scroll_offset: &mut usize,
-) -> io::Result<NormalModeResult> {
+) -> io::Result<IdleModeResult> {
     match (key.code, key.modifiers) {
+        // Quit (Ctrl+X)
         (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
-            if *modified {
-                *mode = Mode::QuitPrompt;
-                return Ok(NormalModeResult::Continue); // Mode changed, just continue loop to handle prompt
-            } else {
-                return Ok(NormalModeResult::Exit);
-            }
+            // Caller checks if modified and decides between Exit and ShowQuitPrompt
+            return Ok(IdleModeResult::ShowQuitPrompt);
         }
+        // Save (Ctrl+O) - handled by caller
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+            // Caller handles save directly
+            return Ok(IdleModeResult::Continue);
+        }
+        // Search (Ctrl+W)
+        (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+            return Ok(IdleModeResult::EnterSearch);
+        }
+        // Toggle theme (Ctrl+T)
         (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
             *theme = match *theme {
                 crate::theme::Theme::Dark => crate::theme::Theme::Light,
                 crate::theme::Theme::Light => crate::theme::Theme::Dark,
             };
         }
+        // Help (Ctrl+G)
         (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
-            *mode = Mode::Help;
+            return Ok(IdleModeResult::ShowHelp);
         }
-        (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
-            return Ok(NormalModeResult::Undo);
-        }
-        (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
-            return Ok(NormalModeResult::Redo);
-        }
+        // Toggle diff view (Ctrl+D)
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+            return Ok(IdleModeResult::ToggleDiffView);
+        }
+        // Undo (Ctrl+Z)
+        (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+            return Ok(IdleModeResult::Undo);
+        }
+        // Redo (Ctrl+Y)
+        (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+            return Ok(IdleModeResult::Redo);
+        }
+        // Delete annotation (Delete or Backspace key)
+        (KeyCode::Delete, _) | (KeyCode::Backspace, _) => {
             if let Some(old_text) = &lines[*cursor_line].annotation {
-                // Return Action instead of mutating directly
-                return Ok(NormalModeResult::Action(Action::EditAnnotation {
+                return Ok(IdleModeResult::Action(Action::EditAnnotation {
                     line_index: *cursor_line,
                     old_text: Some(old_text.clone()),
                     new_text: None,
                 }));
             }
         }
+        // Next annotation (Ctrl+N)
         (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-            // Jump to next annotation
-            for i in (*cursor_line + 1)..lines.len() {
-                if lines[i].annotation.is_some() {
-                    *cursor_line = i;
-                    *annotation_scroll = 0;
-                    adjust_scroll(*cursor_line, scroll_offset, lines)?;
-                    break;
-                }
+            if let Some(next) = find_next_annotation(lines, *cursor_line) {
+                *cursor_line = next;
+                *annotation_scroll = 0;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
             }
         }
+        // Previous annotation (Ctrl+P)
         (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-            // Jump to previous annotation
-            for i in (0..*cursor_line).rev() {
-                if lines[i].annotation.is_some() {
-                    *cursor_line = i;
-                    *annotation_scroll = 0;
-                    adjust_scroll(*cursor_line, scroll_offset, lines)?;
-                    break;
-                }
+            if let Some(prev) = find_prev_annotation(lines, *cursor_line) {
+                *cursor_line = prev;
+                *annotation_scroll = 0;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
             }
         }
+        // Page Up
         (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => {
             let (_, height) = terminal::size()?;
-            *cursor_line = cursor_line.saturating_sub((height - 5) as usize);
+            let content_height = (height.saturating_sub(5)) as usize;
+            *cursor_line = cursor_line.saturating_sub(content_height);
             *annotation_scroll = 0;
-            adjust_scroll(*cursor_line, scroll_offset, lines)?;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
         }
+        // Page Down
         (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => {
             let (_, height) = terminal::size()?;
-            *cursor_line = (*cursor_line + (height - 5) as usize).min(lines.len() - 1);
+            let content_height = (height.saturating_sub(5)) as usize;
+            *cursor_line = (*cursor_line + content_height).min(lines.len().saturating_sub(1));
             *annotation_scroll = 0;
-            adjust_scroll(*cursor_line, scroll_offset, lines)?;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
         }
+        // Up arrow
         (KeyCode::Up, _) => {
             if *cursor_line > 0 {
                 *cursor_line -= 1;
                 *annotation_scroll = 0;
-                adjust_scroll(*cursor_line, scroll_offset, lines)?;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
             }
         }
+        // Down arrow
         (KeyCode::Down, _) => {
-            if *cursor_line < lines.len() - 1 {
+            if *cursor_line < lines.len().saturating_sub(1) {
                 *cursor_line += 1;
                 *annotation_scroll = 0;
-                adjust_scroll(*cursor_line, scroll_offset, lines)?;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
             }
         }
+        // Enter annotation mode
         (KeyCode::Enter, _) => {
-            let existing = lines[*cursor_line].annotation.clone().unwrap_or_default();
+            let initial_text = lines[*cursor_line].annotation.clone().unwrap_or_default();
             *annotation_scroll = 0;
-            *mode = Mode::Annotating { buffer: existing, cursor_pos: 0 };
+            return Ok(IdleModeResult::EnterAnnotation { initial_text });
+        }
+        // Escape - only meaningful in diff view (exits diff)
+        (KeyCode::Esc, _) => {
+            if matches!(view_mode, ViewMode::Diff { .. }) {
+                return Ok(IdleModeResult::ExitDiffView);
+            }
         }
         _ => {}
     }
-    Ok(NormalModeResult::Continue)
+    Ok(IdleModeResult::Continue)
 }
 
-/// Handles key events in annotation mode.
-pub fn handle_annotation_mode(
+/// Unified scroll adjustment that works for both Normal and Diff view modes.
+fn adjust_scroll_unified(
+    cursor_line: usize,
+    scroll_offset: &mut usize,
+    lines: &[Line],
+    view_mode: &ViewMode,
+) -> io::Result<()> {
+    let (width, height) = terminal::size().unwrap_or((80, 24));
+    let content_height = (height.saturating_sub(5)) as usize;
+
+    match view_mode {
+        ViewMode::Diff { diff_result } => {
+            // Use diff-aware scroll adjustment
+            *scroll_offset = adjust_diff_scroll(cursor_line, *scroll_offset, content_height, diff_result);
+        }
+        ViewMode::Normal => {
+            // Use normal scroll adjustment
+            *scroll_offset = adjust_normal_scroll(cursor_line, *scroll_offset, content_height, lines, width as usize);
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Annotation Mode Handler (New Architecture)
+// ============================================================================
+
+/// Result of handling key events in Annotation editing state.
+pub enum AnnotationModeResult {
+    /// Continue editing (buffer/cursor_pos may have changed)
+    Continue,
+    /// User saved the annotation (Enter)
+    Save(Action),
+    /// User cancelled (Esc) - discard changes
+    Cancel,
+}
+
+/// Handles key events in Annotating state.
+/// Does NOT modify editor_state - returns a result that caller interprets.
+pub fn handle_annotation_input(
     key: KeyEvent,
     buffer: &mut String,
     cursor_pos: &mut usize,
-    lines: &mut [Line],
+    lines: &[Line],
     cursor_line: usize,
-    mode: &mut Mode,
-    modified: &mut bool,
     annotation_scroll: &mut usize,
-) -> io::Result<Option<Action>> {
+) -> io::Result<AnnotationModeResult> {
     match key.code {
         KeyCode::Enter => {
             let old_text = lines[cursor_line].annotation.clone();
@@ -138,31 +225,23 @@ pub fn handle_annotation_mode(
                 Some(buffer.clone())
             };
 
-            // Avoid action if nothing changed
+            // Even if nothing changed, treat Enter as "save" (exits annotation mode)
             if old_text != new_text {
-                // lines[cursor_line].annotation = new_text.clone(); // Don't mutate here if using perform_action
-                // But perform_action calls this? No, editor calls perform_action.
-                // We should return the action, and let Editor apply it.
-                // But for visual feedback we might want to apply it... 
-                // Actually Editor.perform_action will modify lines. So we shouldn't modify it here.
-                
-                *modified = true; // Editor.perform_action sets this too, but maybe redundant if we return Action.
                 *annotation_scroll = 0;
-                *mode = Mode::Normal;
-                
-                return Ok(Some(Action::EditAnnotation {
+                return Ok(AnnotationModeResult::Save(Action::EditAnnotation {
                     line_index: cursor_line,
                     old_text,
                     new_text,
                 }));
             } else {
-                 *annotation_scroll = 0;
-                 *mode = Mode::Normal;
+                *annotation_scroll = 0;
+                // No change, but still exit annotation mode
+                return Ok(AnnotationModeResult::Cancel);
             }
         }
         KeyCode::Esc => {
             *annotation_scroll = 0;
-            *mode = Mode::Normal;
+            return Ok(AnnotationModeResult::Cancel);
         }
         KeyCode::Up => {
             move_cursor_up(buffer, cursor_pos, annotation_scroll)?;
@@ -200,51 +279,76 @@ pub fn handle_annotation_mode(
         }
         _ => {}
     }
-    Ok(None)
+    Ok(AnnotationModeResult::Continue)
 }
 
-/// Handles key events in search mode.
-pub fn handle_search_mode(
+// ============================================================================
+// Search Mode Handler (New Architecture)
+// ============================================================================
+
+/// Result of handling key events in Searching state.
+pub enum SearchModeResult {
+    /// Continue searching (query may have changed)
+    Continue,
+    /// User exited search (Esc)
+    Exit,
+}
+
+/// Handles key events in Searching state.
+/// Does NOT modify editor_state - returns a result that caller interprets.
+pub fn handle_search_input(
     key: KeyEvent,
     query: &mut String,
     cursor_pos: &mut usize,
-    mode: &mut Mode,
     search_matches: &mut Vec<usize>,
     current_match: &mut Option<usize>,
     lines: &[Line],
     cursor_line: &mut usize,
     scroll_offset: &mut usize,
-) -> io::Result<()> {
-    match key.code {
-        KeyCode::Enter => {
+    view_mode: &ViewMode,
+) -> io::Result<SearchModeResult> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Enter, KeyModifiers::SHIFT) => {
+            // Shift+Enter: previous match
             if !search_matches.is_empty() {
-                next_search_match(search_matches, current_match, cursor_line);
-                adjust_scroll(*cursor_line, scroll_offset, lines)?;
+                prev_search_match(search_matches, current_match, cursor_line);
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
             }
         }
-        KeyCode::Esc => {
+        (KeyCode::Enter, _) => {
+            // Enter: next match
+            if !search_matches.is_empty() {
+                next_search_match(search_matches, current_match, cursor_line);
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+            }
+        }
+        (KeyCode::Esc, _) => {
             search_matches.clear();
             *current_match = None;
-            *mode = Mode::Normal;
+            return Ok(SearchModeResult::Exit);
         }
-        KeyCode::Char(c) => {
+        (KeyCode::Char(c), _) => {
             query.insert(*cursor_pos, c);
             *cursor_pos += 1;
             perform_search(query, lines, search_matches, current_match, cursor_line);
-            adjust_scroll(*cursor_line, scroll_offset, lines)?;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
         }
-        KeyCode::Backspace => {
+        (KeyCode::Backspace, _) => {
             if *cursor_pos > 0 {
                 *cursor_pos -= 1;
                 query.remove(*cursor_pos);
                 perform_search(query, lines, search_matches, current_match, cursor_line);
-                adjust_scroll(*cursor_line, scroll_offset, lines)?;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
             }
         }
         _ => {}
     }
-    Ok(())
+    Ok(SearchModeResult::Continue)
 }
+
+// ============================================================================
+// Quit Prompt Handler
+// ============================================================================
 
 pub enum QuitPromptResult {
     SaveAndExit,
@@ -262,113 +366,33 @@ pub fn handle_quit_prompt(key: KeyEvent) -> QuitPromptResult {
     }
 }
 
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
 fn move_cursor_up(buffer: &str, cursor_pos: &mut usize, annotation_scroll: &mut usize) -> io::Result<()> {
     let (width, _) = terminal::size()?;
     let max_width = width as usize - 4;
-    let wrapped = wrap_text(buffer, max_width);
-    
-    if wrapped.is_empty() || buffer.is_empty() {
-        return Ok(());
-    }
-    
-    let chars: Vec<char> = buffer.chars().collect();
-    let actual_pos = (*cursor_pos).min(chars.len());
-    
-    let mut chars_so_far = 0;
-    let mut current_line = 0;
-    let mut current_col = 0;
-    
-    for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
-        let wrapped_chars = wrapped_line.chars().count();
-        let next_chars = chars_so_far + wrapped_chars;
-        
-        if actual_pos <= next_chars {
-            current_line = line_idx;
-            current_col = actual_pos - chars_so_far;
-            break;
-        }
-        
-        chars_so_far = next_chars;
-        if line_idx < wrapped.len() - 1 && next_chars < chars.len() {
-            chars_so_far += 1;
-        }
-    }
-    
-    if current_line > 0 {
-        let target_line = current_line - 1;
-        let target_line_len = wrapped[target_line].chars().count();
-        let target_col = current_col.min(target_line_len);
-        
-        let mut new_pos = 0;
-        for i in 0..target_line {
-            new_pos += wrapped[i].chars().count();
-            if i < wrapped.len() - 1 && new_pos < chars.len() {
-                new_pos += 1;
-            }
-        }
-        new_pos += target_col;
-        
-        *cursor_pos = new_pos.min(buffer.len());
-        
-        if target_line < *annotation_scroll {
-            *annotation_scroll = target_line;
-        }
-    }
+
+    // Use pure function from navigation module
+    *cursor_pos = move_cursor_up_in_wrapped(buffer, *cursor_pos, max_width);
+
+    // Adjust scroll to keep cursor visible
+    adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
+
     Ok(())
 }
 
 fn move_cursor_down(buffer: &str, cursor_pos: &mut usize, annotation_scroll: &mut usize) -> io::Result<()> {
     let (width, _) = terminal::size()?;
     let max_width = width as usize - 4;
-    let wrapped = wrap_text(buffer, max_width);
-    
-    if wrapped.is_empty() || buffer.is_empty() {
-        return Ok(());
-    }
-    
-    let chars: Vec<char> = buffer.chars().collect();
-    let actual_pos = (*cursor_pos).min(chars.len());
-    
-    let mut chars_so_far = 0;
-    let mut current_line = 0;
-    let mut current_col = 0;
-    
-    for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
-        let wrapped_chars = wrapped_line.chars().count();
-        let next_chars = chars_so_far + wrapped_chars;
-        
-        if actual_pos <= next_chars {
-            current_line = line_idx;
-            current_col = actual_pos - chars_so_far;
-            break;
-        }
-        
-        chars_so_far = next_chars;
-        if line_idx < wrapped.len() - 1 && next_chars < chars.len() {
-            chars_so_far += 1;
-        }
-    }
-    
-    if current_line < wrapped.len() - 1 {
-        let target_line = current_line + 1;
-        let target_line_len = wrapped[target_line].chars().count();
-        let target_col = current_col.min(target_line_len);
-        
-        let mut new_pos = 0;
-        for i in 0..target_line {
-            new_pos += wrapped[i].chars().count();
-            if i < wrapped.len() - 1 && new_pos < chars.len() {
-                new_pos += 1;
-            }
-        }
-        new_pos += target_col;
-        
-        *cursor_pos = new_pos.min(buffer.len());
-        
-        if target_line >= *annotation_scroll + 2 {
-            *annotation_scroll = target_line - 1;
-        }
-    }
+
+    // Use pure function from navigation module
+    *cursor_pos = move_cursor_down_in_wrapped(buffer, *cursor_pos, max_width);
+
+    // Adjust scroll to keep cursor visible
+    adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
+
     Ok(())
 }
 
@@ -379,19 +403,9 @@ fn perform_search(
     current_match: &mut Option<usize>,
     cursor_line: &mut usize,
 ) {
-    search_matches.clear();
+    // Use pure function from navigation module
+    *search_matches = find_matches(query, lines);
     *current_match = None;
-
-    if query.is_empty() {
-        return;
-    }
-
-    let query_lower = query.to_lowercase();
-    for (i, line) in lines.iter().enumerate() {
-        if line.content.to_lowercase().contains(&query_lower) {
-            search_matches.push(i);
-        }
-    }
 
     if !search_matches.is_empty() {
         *current_match = Some(0);
@@ -404,43 +418,25 @@ fn next_search_match(
     current_match: &mut Option<usize>,
     cursor_line: &mut usize,
 ) {
-    if search_matches.is_empty() {
-        return;
-    }
-    if let Some(idx) = *current_match {
-        let next = (idx + 1) % search_matches.len();
-        *current_match = Some(next);
-        *cursor_line = search_matches[next];
+    use crate::navigation::{cycle_match, CycleDirection};
+
+    if let Some((new_idx, line)) = cycle_match(search_matches, *current_match, CycleDirection::Next) {
+        *current_match = Some(new_idx);
+        *cursor_line = line;
     }
 }
 
-fn adjust_scroll(cursor_line: usize, scroll_offset: &mut usize, lines: &[Line]) -> io::Result<()> {
-    let (width, height) = terminal::size().unwrap_or((80, 24));
-    let content_height = (height - 5) as usize;
+fn prev_search_match(
+    search_matches: &[usize],
+    current_match: &mut Option<usize>,
+    cursor_line: &mut usize,
+) {
+    use crate::navigation::{cycle_match, CycleDirection};
 
-    if cursor_line < *scroll_offset {
-        *scroll_offset = cursor_line;
+    if let Some((new_idx, line)) = cycle_match(search_matches, *current_match, CycleDirection::Previous) {
+        *current_match = Some(new_idx);
+        *cursor_line = line;
     }
-
-    let mut visual_lines = 0;
-    for i in *scroll_offset..=cursor_line {
-        if i >= lines.len() { break; }
-        let wrapped = wrap_text(&lines[i].content, width as usize);
-        visual_lines += if wrapped.is_empty() { 1 } else { wrapped.len() };
-    }
-
-    while visual_lines > content_height {
-        if *scroll_offset >= cursor_line {
-            break;
-        }
-        let wrapped = wrap_text(&lines[*scroll_offset].content, width as usize);
-        let count = if wrapped.is_empty() { 1 } else { wrapped.len() };
-        
-        *scroll_offset += 1;
-        visual_lines = visual_lines.saturating_sub(count);
-    }
-
-    Ok(())
 }
 
 fn adjust_annotation_scroll(
@@ -450,39 +446,16 @@ fn adjust_annotation_scroll(
 ) -> io::Result<()> {
     let (width, _) = terminal::size().unwrap_or((80, 24));
     let max_width = width as usize - 4;
-    let wrapped = wrap_text(buffer, max_width);
-    
-    if wrapped.is_empty() || buffer.is_empty() {
-        *annotation_scroll = 0;
-        return Ok(());
-    }
+    let visible_lines = 2; // Annotation area shows 2 lines
 
-    let chars: Vec<char> = buffer.chars().collect();
-    let actual_pos = cursor_pos.min(chars.len());
-    
-    let mut chars_so_far = 0;
-    let mut current_line = 0;
-    
-    for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
-        let wrapped_chars = wrapped_line.chars().count();
-        let next_chars = chars_so_far + wrapped_chars;
-        
-        if actual_pos <= next_chars {
-            current_line = line_idx;
-            break;
-        }
-        
-        chars_so_far = next_chars;
-        if line_idx < wrapped.len() - 1 && next_chars < chars.len() {
-            chars_so_far += 1;
-        }
-    }
-
-    if current_line < *annotation_scroll {
-        *annotation_scroll = current_line;
-    } else if current_line >= *annotation_scroll + 2 {
-        *annotation_scroll = current_line - 1;
-    }
+    // Use the pure function from navigation module
+    *annotation_scroll = adjust_annotation_scroll_pure(
+        buffer,
+        cursor_pos,
+        *annotation_scroll,
+        max_width,
+        visible_lines,
+    );
 
     Ok(())
 }
@@ -491,110 +464,9 @@ fn adjust_annotation_scroll(
 mod tests {
     use super::*;
     use crate::text::wrap_text;
-    use crate::models::{Action, Line, Mode};
+    use crate::models::Line;
+    use crate::diff::{DiffResult, DiffLine, LineChange};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    #[test]
-    fn test_adjust_annotation_scroll_basic() {
-        let mut scroll = 0;
-        // Text that will wrap at 10 chars (width 14 - 4)
-        let text = "one two three four five six";
-        let width: u16 = 14;
-        
-        // Line 0: "one two " (8 chars)
-        // Line 1: "three four " (11 chars -> "three ") -> "three four" is 10 chars.
-        // "one two" (7)
-        // "three four" (10)
-        // "five six" (8)
-
-        adjust_annotation_scroll_with_width(text, 0, &mut scroll, width).unwrap();
-        assert_eq!(scroll, 0);
-        
-        // Cursor at end of L1 (pos 18)
-        adjust_annotation_scroll_with_width(text, 18, &mut scroll, width).unwrap();
-        assert_eq!(scroll, 0); 
-        
-        // Cursor at start of L2 (pos 19)
-        adjust_annotation_scroll_with_width(text, 19, &mut scroll, width).unwrap();
-        assert_eq!(scroll, 1); 
-    }
-
-    #[test]
-    fn test_adjust_annotation_scroll_empty() {
-        let mut scroll = 5;
-        adjust_annotation_scroll_with_width("", 0, &mut scroll, 80).unwrap();
-        assert_eq!(scroll, 0);
-    }
-
-    #[test]
-    fn test_jump_to_annotation() {
-        let mut lines = vec![
-            Line { content: "0".to_string(), annotation: None },
-            Line { content: "1".to_string(), annotation: Some("a1".to_string()) },
-            Line { content: "2".to_string(), annotation: None },
-            Line { content: "3".to_string(), annotation: Some("a2".to_string()) },
-            Line { content: "4".to_string(), annotation: None },
-        ];
-        
-        let mut cursor_line = 0;
-        let mut scroll_offset = 0;
-        let mut annotation_scroll = 0;
-        let mut mode = Mode::Normal;
-        let mut theme = crate::theme::Theme::Dark;
-        let mut modified = false;
-
-        // Jump Next (from 0 to 1)
-        let _ = handle_normal_mode(
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
-            &mut lines,
-            &mut cursor_line,
-            &mut mode,
-            &mut theme,
-            &mut modified,
-            &mut annotation_scroll,
-            &mut scroll_offset,
-        ).unwrap();
-        assert_eq!(cursor_line, 1);
-
-        // Jump Next (from 1 to 3)
-        let _ = handle_normal_mode(
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
-            &mut lines,
-            &mut cursor_line,
-            &mut mode,
-            &mut theme,
-            &mut modified,
-            &mut annotation_scroll,
-            &mut scroll_offset,
-        ).unwrap();
-        assert_eq!(cursor_line, 3);
-
-        // Jump Next (from 3 - no next)
-        let _ = handle_normal_mode(
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
-            &mut lines,
-            &mut cursor_line,
-            &mut mode,
-            &mut theme,
-            &mut modified,
-            &mut annotation_scroll,
-            &mut scroll_offset,
-        ).unwrap();
-        assert_eq!(cursor_line, 3);
-
-        // Jump Prev (from 3 to 1)
-        let _ = handle_normal_mode(
-            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
-            &mut lines,
-            &mut cursor_line,
-            &mut mode,
-            &mut theme,
-            &mut modified,
-            &mut annotation_scroll,
-            &mut scroll_offset,
-        ).unwrap();
-        assert_eq!(cursor_line, 1);
-    }
 
     // Helper for testing with fixed width
     fn adjust_annotation_scroll_with_width(
@@ -605,7 +477,7 @@ mod tests {
     ) -> io::Result<()> {
         let max_width = width as usize - 4;
         let wrapped = wrap_text(buffer, max_width);
-        
+
         if wrapped.is_empty() || buffer.is_empty() {
             *annotation_scroll = 0;
             return Ok(());
@@ -613,19 +485,19 @@ mod tests {
 
         let chars: Vec<char> = buffer.chars().collect();
         let actual_pos = cursor_pos.min(chars.len());
-        
+
         let mut chars_so_far = 0;
         let mut current_line = 0;
-        
+
         for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
             let wrapped_chars = wrapped_line.chars().count();
             let next_chars = chars_so_far + wrapped_chars;
-            
+
             if actual_pos <= next_chars {
                 current_line = line_idx;
                 break;
             }
-            
+
             chars_so_far = next_chars;
             if line_idx < wrapped.len() - 1 && next_chars < chars.len() {
                 chars_so_far += 1;
@@ -639,5 +511,728 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Annotation Scroll Tests
+    // ========================================================================
+
+    #[test]
+    fn test_adjust_annotation_scroll_basic() {
+        let mut scroll = 0;
+        let text = "one two three four five six";
+        let width: u16 = 14;
+
+        adjust_annotation_scroll_with_width(text, 0, &mut scroll, width).unwrap();
+        assert_eq!(scroll, 0);
+
+        adjust_annotation_scroll_with_width(text, 18, &mut scroll, width).unwrap();
+        assert_eq!(scroll, 0);
+
+        adjust_annotation_scroll_with_width(text, 19, &mut scroll, width).unwrap();
+        assert_eq!(scroll, 1);
+    }
+
+    #[test]
+    fn test_adjust_annotation_scroll_empty() {
+        let mut scroll = 5;
+        adjust_annotation_scroll_with_width("", 0, &mut scroll, 80).unwrap();
+        assert_eq!(scroll, 0);
+    }
+
+    // ========================================================================
+    // Idle Mode Tests (using new handle_idle_mode)
+    // ========================================================================
+
+    #[test]
+    fn test_idle_mode_jump_to_next_annotation() {
+        let mut lines = vec![
+            Line { content: "0".to_string(), annotation: None },
+            Line { content: "1".to_string(), annotation: Some("a1".to_string()) },
+            Line { content: "2".to_string(), annotation: None },
+            Line { content: "3".to_string(), annotation: Some("a2".to_string()) },
+            Line { content: "4".to_string(), annotation: None },
+        ];
+
+        let mut cursor_line = 0;
+        let mut scroll_offset = 0;
+        let mut annotation_scroll = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+
+        // Jump Next (from 0 to 1)
+        let _ = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+        assert_eq!(cursor_line, 1);
+
+        // Jump Next (from 1 to 3)
+        let _ = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+        assert_eq!(cursor_line, 3);
+
+        // Jump Next (from 3 - no next, stays at 3)
+        let _ = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+        assert_eq!(cursor_line, 3);
+    }
+
+    #[test]
+    fn test_idle_mode_jump_to_prev_annotation() {
+        let mut lines = vec![
+            Line { content: "0".to_string(), annotation: None },
+            Line { content: "1".to_string(), annotation: Some("a1".to_string()) },
+            Line { content: "2".to_string(), annotation: None },
+            Line { content: "3".to_string(), annotation: Some("a2".to_string()) },
+            Line { content: "4".to_string(), annotation: None },
+        ];
+
+        let mut cursor_line = 3;
+        let mut scroll_offset = 0;
+        let mut annotation_scroll = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+
+        // Jump Prev (from 3 to 1)
+        let _ = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+        assert_eq!(cursor_line, 1);
+    }
+
+    #[test]
+    fn test_idle_mode_ctrl_x_shows_quit_prompt() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::ShowQuitPrompt));
+    }
+
+    #[test]
+    fn test_idle_mode_ctrl_g_shows_help() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::ShowHelp));
+    }
+
+    #[test]
+    fn test_idle_mode_ctrl_w_enters_search() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::EnterSearch));
+    }
+
+    #[test]
+    fn test_idle_mode_enter_enters_annotation() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::EnterAnnotation { .. }));
+    }
+
+    #[test]
+    fn test_idle_mode_delete_removes_annotation() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: Some("test".to_string()) },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::Action(Action::EditAnnotation { .. })));
+    }
+
+    #[test]
+    fn test_idle_mode_ctrl_d_toggles_diff() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::ToggleDiffView));
+    }
+
+    #[test]
+    fn test_idle_mode_ctrl_z_undo() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::Undo));
+    }
+
+    #[test]
+    fn test_idle_mode_ctrl_y_redo() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Normal;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::Redo));
+    }
+
+    // ========================================================================
+    // Diff View Mode Tests (same handler, different view mode)
+    // ========================================================================
+
+    #[test]
+    fn test_diff_view_ctrl_x_shows_quit_prompt() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Diff {
+            diff_result: DiffResult {
+                lines: vec![DiffLine {
+                    working: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                    head: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                }],
+            },
+        };
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::ShowQuitPrompt));
+    }
+
+    #[test]
+    fn test_diff_view_ctrl_g_shows_help() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Diff {
+            diff_result: DiffResult {
+                lines: vec![DiffLine {
+                    working: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                    head: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                }],
+            },
+        };
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::ShowHelp));
+    }
+
+    #[test]
+    fn test_diff_view_delete_removes_annotation() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: Some("test".to_string()) },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Diff {
+            diff_result: DiffResult {
+                lines: vec![DiffLine {
+                    working: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                    head: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                }],
+            },
+        };
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::Action(Action::EditAnnotation { .. })));
+    }
+
+    #[test]
+    fn test_diff_view_enter_enters_annotation() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Diff {
+            diff_result: DiffResult {
+                lines: vec![DiffLine {
+                    working: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                    head: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                }],
+            },
+        };
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::EnterAnnotation { .. }));
+    }
+
+    #[test]
+    fn test_diff_view_esc_exits_diff() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Diff {
+            diff_result: DiffResult {
+                lines: vec![DiffLine {
+                    working: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                    head: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                }],
+            },
+        };
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::ExitDiffView));
+    }
+
+    #[test]
+    fn test_diff_view_ctrl_d_toggles_diff() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let view_mode = ViewMode::Diff {
+            diff_result: DiffResult {
+                lines: vec![DiffLine {
+                    working: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                    head: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                }],
+            },
+        };
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &view_mode,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::ToggleDiffView));
+    }
+
+    // ========================================================================
+    // Quit Prompt Tests
+    // ========================================================================
+
+    #[test]
+    fn test_quit_prompt_y_saves_and_exits() {
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::SaveAndExit));
+    }
+
+    #[test]
+    fn test_quit_prompt_n_exits() {
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::Exit));
+    }
+
+    #[test]
+    fn test_quit_prompt_esc_cancels() {
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::Cancel));
+    }
+
+    // ========================================================================
+    // Annotation Mode Tests
+    // ========================================================================
+
+    #[test]
+    fn test_annotation_input_enter_saves() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "new annotation".to_string();
+        let mut cursor_pos = buffer.len();
+        let mut annotation_scroll = 0;
+
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Save(_)));
+    }
+
+    #[test]
+    fn test_annotation_input_esc_cancels() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "new annotation".to_string();
+        let mut cursor_pos = buffer.len();
+        let mut annotation_scroll = 0;
+
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Cancel));
+    }
+
+    #[test]
+    fn test_annotation_input_char_appends() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "test".to_string();
+        let mut cursor_pos = buffer.len();
+        let mut annotation_scroll = 0;
+
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(buffer, "test!");
+        assert_eq!(cursor_pos, 5);
+    }
+
+    #[test]
+    fn test_annotation_input_backspace_removes() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "test".to_string();
+        let mut cursor_pos = buffer.len();
+        let mut annotation_scroll = 0;
+
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(buffer, "tes");
+        assert_eq!(cursor_pos, 3);
+    }
+
+    // ========================================================================
+    // Search Mode Tests
+    // ========================================================================
+
+    #[test]
+    fn test_search_input_esc_exits() {
+        let lines = vec![
+            Line { content: "test line".to_string(), annotation: None },
+        ];
+        let mut query = "test".to_string();
+        let mut cursor_pos = query.len();
+        let mut search_matches = vec![0];
+        let mut current_match = Some(0);
+        let mut cursor_line = 0;
+        let mut scroll_offset = 0;
+        let view_mode = ViewMode::Normal;
+
+        let result = handle_search_input(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut query,
+            &mut cursor_pos,
+            &mut search_matches,
+            &mut current_match,
+            &lines,
+            &mut cursor_line,
+            &mut scroll_offset,
+            &view_mode,
+        ).unwrap();
+
+        assert!(matches!(result, SearchModeResult::Exit));
+        assert!(search_matches.is_empty());
+        assert!(current_match.is_none());
+    }
+
+    #[test]
+    fn test_search_input_char_updates_query() {
+        let lines = vec![
+            Line { content: "test line".to_string(), annotation: None },
+        ];
+        let mut query = "tes".to_string();
+        let mut cursor_pos = query.len();
+        let mut search_matches = vec![];
+        let mut current_match = None;
+        let mut cursor_line = 0;
+        let mut scroll_offset = 0;
+        let view_mode = ViewMode::Normal;
+
+        let result = handle_search_input(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            &mut query,
+            &mut cursor_pos,
+            &mut search_matches,
+            &mut current_match,
+            &lines,
+            &mut cursor_line,
+            &mut scroll_offset,
+            &view_mode,
+        ).unwrap();
+
+        assert!(matches!(result, SearchModeResult::Continue));
+        assert_eq!(query, "test");
+    }
+
+    // ========================================================================
+    // Independence Tests: ViewMode does NOT affect EditorState behavior
+    // ========================================================================
+
+    #[test]
+    fn test_shortcuts_work_same_in_normal_and_diff_view() {
+        // Test that the same shortcut produces the same result regardless of view mode
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        // Test Ctrl+G in Normal view
+        let normal_view = ViewMode::Normal;
+        let result_normal = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &normal_view,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        // Test Ctrl+G in Diff view
+        let diff_view = ViewMode::Diff {
+            diff_result: DiffResult {
+                lines: vec![DiffLine {
+                    working: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                    head: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                }],
+            },
+        };
+        let result_diff = handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &diff_view,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        // Both should return ShowHelp
+        assert!(matches!(result_normal, IdleModeResult::ShowHelp));
+        assert!(matches!(result_diff, IdleModeResult::ShowHelp));
     }
 }
