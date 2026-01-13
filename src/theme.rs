@@ -37,7 +37,7 @@ impl Theme {
             Theme::Dark => ColorScheme {
                 bg: Color::Black,
                 _fg: Color::White,
-                selected_bg: Color::DarkGrey,
+                selected_bg: Color::Rgb { r: 40, g: 40, b: 40 },
                 annotated_bg: Color::Rgb { r: 40, g: 60, b: 80 },
                 annotated_selected_bg: Color::Rgb {
                     r: 60,
@@ -192,6 +192,7 @@ mod tests {
         let colors = theme.colors();
         assert_eq!(colors.bg, Color::Black);
         assert_eq!(colors._fg, Color::White);
+        assert_eq!(colors.selected_bg, Color::Rgb { r: 40, g: 40, b: 40 });
         assert_eq!(colors.status_bg, Color::DarkGrey);
     }
 
