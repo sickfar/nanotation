@@ -3,7 +3,8 @@ use crate::diff::adjust_diff_scroll;
 use crate::models::{Action, Line, ViewMode};
 use crate::navigation::{
     adjust_annotation_scroll_pure, adjust_normal_scroll, find_matches, find_next_annotation,
-    find_prev_annotation, move_cursor_down_in_wrapped, move_cursor_up_in_wrapped,
+    find_next_word_boundary, find_prev_annotation, find_prev_word_boundary,
+    move_cursor_down_in_wrapped, move_cursor_up_in_wrapped,
 };
 use crossterm::{
     event::{KeyCode, KeyEvent, KeyModifiers},
@@ -305,6 +306,14 @@ pub fn handle_annotation_input(
                 buffer.remove(byte_idx);
                 adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
             }
+        }
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+            *cursor_pos = find_prev_word_boundary(buffer, *cursor_pos);
+            adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
+        }
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+            *cursor_pos = find_next_word_boundary(buffer, *cursor_pos);
+            adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
         }
         KeyCode::Left => {
             *cursor_pos = cursor_pos.saturating_sub(1);
@@ -1438,6 +1447,244 @@ mod tests {
         assert!(matches!(result, AnnotationModeResult::Continue));
         assert_eq!(buffer, "Прии");
         assert_eq!(cursor_pos, 3);
+    }
+
+    // ========================================================================
+    // Alt+Left/Alt+Right Word Navigation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_annotation_input_alt_right_basic() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "hello world foo".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right from start
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(cursor_pos, 6); // Jump to "world"
+    }
+
+    #[test]
+    fn test_annotation_input_alt_left_basic() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "hello world foo".to_string();
+        let mut cursor_pos = 15; // At end
+        let mut annotation_scroll = 0;
+
+        // Alt+Left from end
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(cursor_pos, 12); // Jump to "foo"
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_cyrillic() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Привет мир тест".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right through Cyrillic text
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 7); // After "Привет "
+
+        // Continue to next word
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 11); // After "мир "
+
+        // Alt+Left to go back
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 7); // Back to "мир"
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_with_punctuation() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "TODO: fix bug".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right skips boundaries and jumps to next word
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 6); // Jump to "fix" (skip "TODO:" and space)
+
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 10); // Jump to "bug" (skip space)
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_mixed_unicode() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Fix функцию get_data() error".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right through mixed English/Cyrillic
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(cursor_pos > 0); // Moved forward
+
+        // Continue navigating
+        let mut count = 0;
+        while cursor_pos < buffer.chars().count() && count < 10 {
+            handle_annotation_input(
+                KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+                &mut buffer,
+                &mut cursor_pos,
+                &lines,
+                0,
+                &mut annotation_scroll,
+            ).unwrap();
+            count += 1;
+        }
+
+        // Should reach end without panic
+        assert_eq!(cursor_pos, buffer.chars().count());
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_emoji() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Done 🎉 success".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right past emoji
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 5); // After "Done "
+
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 7); // After "🎉 "
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_at_boundaries() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "hello".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Left at start should stay at start
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 0);
+
+        // Jump to end
+        cursor_pos = buffer.chars().count();
+
+        // Alt+Right at end should stay at end
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, buffer.chars().count());
     }
 
     // ========================================================================

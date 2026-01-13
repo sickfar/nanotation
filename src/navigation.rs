@@ -310,6 +310,91 @@ pub fn adjust_annotation_scroll_pure(
 }
 
 // ============================================================================
+// Word Navigation
+// ============================================================================
+
+/// Check if a character is a word boundary (whitespace or punctuation).
+/// Underscores are treated as word characters (not boundaries) for programming contexts.
+fn is_word_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(
+        c,
+        '.' | ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}' |
+        '<' | '>' | '/' | '\\' | '|' | '@' | '#' | '$' | '%' | '^' | '&' | '*' |
+        '+' | '=' | '-' | '"' | '\'' | '`' | '~'
+    )
+}
+
+/// Find the start of the previous word from cursor position.
+/// Returns 0 if at the start of the buffer.
+pub fn find_prev_word_boundary(buffer: &str, cursor_pos: usize) -> usize {
+    let chars: Vec<char> = buffer.chars().collect();
+
+    if chars.is_empty() || cursor_pos == 0 {
+        return 0;
+    }
+
+    let mut pos = cursor_pos.min(chars.len());
+
+    // Move back one position to analyze what we're dealing with
+    if pos > 0 {
+        pos -= 1;
+    }
+
+    // If we're at a boundary, skip back over boundaries to find a word character
+    if is_word_boundary(chars[pos]) {
+        while pos > 0 && is_word_boundary(chars[pos]) {
+            pos -= 1;
+        }
+        // Now we're at a word character; skip back to the start of this word
+        while pos > 0 && !is_word_boundary(chars[pos - 1]) {
+            pos -= 1;
+        }
+    } else {
+        // We're at a word character; skip back to the start of this word
+        while pos > 0 && !is_word_boundary(chars[pos - 1]) {
+            pos -= 1;
+        }
+    }
+
+    pos
+}
+
+/// Find the start of the next word from cursor position.
+/// Returns buffer.chars().count() if at the end of the buffer.
+pub fn find_next_word_boundary(buffer: &str, cursor_pos: usize) -> usize {
+    let chars: Vec<char> = buffer.chars().collect();
+
+    if chars.is_empty() {
+        return 0;
+    }
+
+    let mut pos = cursor_pos.min(chars.len());
+
+    // If we're past the end, return end
+    if pos >= chars.len() {
+        return chars.len();
+    }
+
+    // If we're at a word character, skip to the end of this word
+    if !is_word_boundary(chars[pos]) {
+        while pos < chars.len() && !is_word_boundary(chars[pos]) {
+            pos += 1;
+        }
+        // Now skip over any consecutive boundaries
+        while pos < chars.len() && is_word_boundary(chars[pos]) {
+            pos += 1;
+        }
+    } else {
+        // We're at a boundary; skip to the next word character
+        while pos < chars.len() && is_word_boundary(chars[pos]) {
+            pos += 1;
+        }
+    }
+
+    pos
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -753,5 +838,274 @@ mod annotation_scroll_tests {
         // Scroll at 2, but cursor at position 0 (line 0)
         let scroll = adjust_annotation_scroll_pure(buffer, 0, 2, 10, 2);
         assert_eq!(scroll, 0); // Should scroll up
+    }
+}
+
+#[cfg(test)]
+mod word_navigation_tests {
+    use super::*;
+
+    // =========================================================================
+    // Basic Word Navigation
+    // =========================================================================
+
+    #[test]
+    fn test_find_next_word_basic() {
+        let buffer = "hello world foo";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 6);   // "hello " -> "world"
+        assert_eq!(find_next_word_boundary(buffer, 6), 12);  // "world " -> "foo"
+        assert_eq!(find_next_word_boundary(buffer, 12), 15); // At "foo" -> end
+    }
+
+    #[test]
+    fn test_find_prev_word_basic() {
+        let buffer = "hello world foo";
+
+        assert_eq!(find_prev_word_boundary(buffer, 15), 12); // End -> "foo"
+        assert_eq!(find_prev_word_boundary(buffer, 12), 6);  // "foo" -> "world"
+        assert_eq!(find_prev_word_boundary(buffer, 6), 0);   // "world" -> "hello"
+        assert_eq!(find_prev_word_boundary(buffer, 0), 0);   // At start
+    }
+
+    #[test]
+    fn test_word_nav_from_middle() {
+        let buffer = "hello world";
+
+        // From middle of "world" (position 8)
+        assert_eq!(find_prev_word_boundary(buffer, 8), 6); // Jump to start of "world"
+        assert_eq!(find_next_word_boundary(buffer, 8), 11); // Jump to end
+    }
+
+    // =========================================================================
+    // Punctuation Handling
+    // =========================================================================
+
+    #[test]
+    fn test_word_nav_with_punctuation() {
+        let buffer = "TODO: fix bug";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 6);  // "TODO:" -> "fix" (skip to next word)
+        assert_eq!(find_next_word_boundary(buffer, 6), 10); // "fix " -> "bug"
+        assert_eq!(find_next_word_boundary(buffer, 10), 13); // "bug" -> end
+    }
+
+    #[test]
+    fn test_word_nav_consecutive_punctuation() {
+        let buffer = "hello...world";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 8);  // "hello..." -> "world"
+        assert_eq!(find_next_word_boundary(buffer, 8), 13); // "world" -> end
+
+        assert_eq!(find_prev_word_boundary(buffer, 13), 8); // End -> "world"
+        assert_eq!(find_prev_word_boundary(buffer, 8), 0);  // "world" -> "hello"
+    }
+
+    #[test]
+    fn test_word_nav_function_call() {
+        let buffer = "Fix get_user() function";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 4);   // "Fix " -> "get_user"
+        assert_eq!(find_next_word_boundary(buffer, 4), 15);  // "get_user() " -> "function"
+        assert_eq!(find_next_word_boundary(buffer, 15), 23); // "function" -> end
+    }
+
+    #[test]
+    fn test_word_nav_multiple_spaces() {
+        let buffer = "hello    world";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 9);  // "hello" -> "world" (skip spaces)
+        assert_eq!(find_prev_word_boundary(buffer, 14), 9); // End -> "world"
+        assert_eq!(find_prev_word_boundary(buffer, 9), 0);  // "world" -> "hello"
+    }
+
+    // =========================================================================
+    // Unicode Support
+    // =========================================================================
+
+    #[test]
+    fn test_word_nav_cyrillic() {
+        let buffer = "Привет мир";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 7);   // "Привет " -> "мир"
+        assert_eq!(find_prev_word_boundary(buffer, 10), 7);  // End -> "мир"
+        assert_eq!(find_prev_word_boundary(buffer, 7), 0);   // "мир" -> "Привет"
+    }
+
+    #[test]
+    fn test_word_nav_mixed_unicode() {
+        let buffer = "Hello Привет world";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 6);   // "Hello " -> "Привет"
+        assert_eq!(find_next_word_boundary(buffer, 6), 13);  // "Привет " -> "world"
+
+        assert_eq!(find_prev_word_boundary(buffer, 18), 13); // End -> "world"
+        assert_eq!(find_prev_word_boundary(buffer, 13), 6);  // "world" -> "Привет"
+        assert_eq!(find_prev_word_boundary(buffer, 6), 0);   // "Привет" -> "Hello"
+    }
+
+    #[test]
+    fn test_word_nav_emoji() {
+        let buffer = "Test 🎉 done";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 5);  // "Test " -> "🎉"
+        assert_eq!(find_next_word_boundary(buffer, 5), 7);  // "🎉 " -> "done"
+
+        assert_eq!(find_prev_word_boundary(buffer, 11), 7); // End -> "done"
+        assert_eq!(find_prev_word_boundary(buffer, 7), 5);  // "done" -> "🎉"
+        assert_eq!(find_prev_word_boundary(buffer, 5), 0);  // "🎉" -> "Test"
+    }
+
+    #[test]
+    fn test_word_nav_cyrillic_with_punctuation() {
+        let buffer = "Привет, мир!";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 8);  // "Привет, " -> "мир"
+        assert_eq!(find_next_word_boundary(buffer, 8), 12); // "мир!" -> end
+    }
+
+    // =========================================================================
+    // Edge Cases
+    // =========================================================================
+
+    #[test]
+    fn test_word_nav_empty_buffer() {
+        let buffer = "";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 0);
+        assert_eq!(find_prev_word_boundary(buffer, 0), 0);
+    }
+
+    #[test]
+    fn test_word_nav_single_word() {
+        let buffer = "hello";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 5);  // Jump to end
+        assert_eq!(find_prev_word_boundary(buffer, 5), 0);  // Jump to start
+        assert_eq!(find_prev_word_boundary(buffer, 0), 0);  // Already at start
+    }
+
+    #[test]
+    fn test_word_nav_only_punctuation() {
+        let buffer = "...";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 3);  // Jump to end
+        assert_eq!(find_prev_word_boundary(buffer, 3), 0);  // Jump to start
+    }
+
+    #[test]
+    fn test_word_nav_only_whitespace() {
+        let buffer = "   ";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 3);  // Jump to end
+        assert_eq!(find_prev_word_boundary(buffer, 3), 0);  // Jump to start
+    }
+
+    #[test]
+    fn test_word_nav_cursor_past_end() {
+        let buffer = "hello world";
+
+        // Cursor position beyond buffer length should be clamped
+        assert_eq!(find_next_word_boundary(buffer, 100), 11);
+        assert_eq!(find_prev_word_boundary(buffer, 100), 6);
+    }
+
+    #[test]
+    fn test_word_nav_starting_with_space() {
+        let buffer = " hello world";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 1);  // " " -> "hello"
+        assert_eq!(find_next_word_boundary(buffer, 1), 7);  // "hello " -> "world"
+    }
+
+    #[test]
+    fn test_word_nav_ending_with_space() {
+        let buffer = "hello world ";
+
+        assert_eq!(find_prev_word_boundary(buffer, 12), 6); // End space -> "world"
+        assert_eq!(find_prev_word_boundary(buffer, 6), 0);  // "world" -> "hello"
+    }
+
+    // =========================================================================
+    // Complex Real-World Scenarios
+    // =========================================================================
+
+    #[test]
+    fn test_word_nav_code_annotation() {
+        let buffer = "TODO: refactor get_user() method - add validation";
+
+        // Navigate forward through words
+        let mut pos = 0;
+
+        // From start: "TODO:" -> "refactor"
+        pos = find_next_word_boundary(buffer, pos);
+        assert_eq!(pos, 6);
+
+        // "refactor " -> "get_user()"
+        pos = find_next_word_boundary(buffer, pos);
+        assert_eq!(pos, 15);
+
+        // "get_user() " -> "method"
+        pos = find_next_word_boundary(buffer, pos);
+        assert_eq!(pos, 26);
+
+        // "method - " -> "add"
+        pos = find_next_word_boundary(buffer, pos);
+        assert_eq!(pos, 35);
+
+        // "add " -> "validation"
+        pos = find_next_word_boundary(buffer, pos);
+        assert_eq!(pos, 39);
+
+        // "validation" -> end
+        pos = find_next_word_boundary(buffer, pos);
+        assert_eq!(pos, 49);
+    }
+
+    #[test]
+    fn test_word_nav_mixed_script_code() {
+        // Russian comment with code
+        let buffer = "Исправить функцию get_data() для обработки ошибок";
+
+        let pos = find_next_word_boundary(buffer, 0); // "Исправить " -> "функцию"
+        assert!(pos > 0 && pos < buffer.chars().count());
+
+        let pos = find_next_word_boundary(buffer, pos); // "функцию " -> "get_data"
+        assert!(pos > 0 && pos < buffer.chars().count());
+    }
+
+    #[test]
+    fn test_word_nav_back_and_forth() {
+        let buffer = "one two three";
+
+        let mut pos = 0;
+        pos = find_next_word_boundary(buffer, pos); // -> "two"
+        assert_eq!(pos, 4);
+
+        pos = find_next_word_boundary(buffer, pos); // -> "three"
+        assert_eq!(pos, 8);
+
+        pos = find_prev_word_boundary(buffer, pos); // -> "two"
+        assert_eq!(pos, 4);
+
+        pos = find_prev_word_boundary(buffer, pos); // -> "one"
+        assert_eq!(pos, 0);
+    }
+
+    #[test]
+    fn test_word_nav_special_chars() {
+        let buffer = "var@name#test$value";
+
+        assert_eq!(find_next_word_boundary(buffer, 0), 4);   // "var@name" -> "#"
+        assert_eq!(find_next_word_boundary(buffer, 4), 9);   // "#test" -> "$"
+        assert_eq!(find_next_word_boundary(buffer, 9), 14);  // "$value" -> end
+    }
+
+    #[test]
+    fn test_word_nav_underscore_handling() {
+        let buffer = "get_user_id";
+
+        // Underscores are word characters (not boundaries) for programming
+        assert_eq!(find_next_word_boundary(buffer, 0), 11);  // "get_user_id" -> end
     }
 }
