@@ -1,4 +1,4 @@
-use crate::diff::calculate_diff;
+use crate::diff::{calculate_diff, strip_annotation};
 use crate::event_handler;
 use crate::file;
 use crate::git;
@@ -11,7 +11,9 @@ use crossterm::{
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 
 /// Minimum terminal width required for diff mode (100 columns)
@@ -35,7 +37,8 @@ pub struct Editor {
     /// What input mode the user is in (Idle, Annotating, etc.)
     pub editor_state: EditorState,
     pub file_path: Option<String>,
-    pub modified: bool,
+    /// Hash of content at last save (for detecting unsaved changes)
+    saved_content_hash: u64,
     pub theme: Theme,
     pub lang_comment: String,
     pub search_matches: Vec<usize>,
@@ -56,6 +59,7 @@ impl Editor {
         let theme = Theme::Dark;
         let highlighter =
             crate::highlighting::SyntaxHighlighter::new(matches!(theme, Theme::Dark));
+        let saved_content_hash = Self::compute_content_hash(&lines);
 
         Ok(Editor {
             lines,
@@ -64,7 +68,7 @@ impl Editor {
             view_mode: ViewMode::Normal,
             editor_state: EditorState::Idle,
             file_path: Some(file_path),
-            modified: false,
+            saved_content_hash,
             theme,
             lang_comment,
             search_matches: Vec::new(),
@@ -75,6 +79,21 @@ impl Editor {
             highlighter,
             status_message: None,
         })
+    }
+
+    /// Compute a hash of the current content (lines + annotations)
+    fn compute_content_hash(lines: &[Line]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for line in lines {
+            line.content.hash(&mut hasher);
+            line.annotation.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Check if content has been modified since last save
+    pub fn is_modified(&self) -> bool {
+        Self::compute_content_hash(&self.lines) != self.saved_content_hash
     }
 
     /// Try to enter diff mode. Returns error message if not possible.
@@ -137,7 +156,8 @@ impl Editor {
     pub fn save(&mut self) -> io::Result<()> {
         if let Some(ref path) = self.file_path {
             file::save_file(path, &self.lines, &self.lang_comment)?;
-            self.modified = false;
+            // Update hash to reflect saved state
+            self.saved_content_hash = Self::compute_content_hash(&self.lines);
         }
         Ok(())
     }
@@ -149,7 +169,7 @@ impl Editor {
         }
         self.history.push(action);
         self.history_index += 1;
-        self.modified = true;
+        // No need to set modified flag - is_modified() uses hash comparison
     }
 
     pub fn undo(&mut self) {
@@ -160,7 +180,7 @@ impl Editor {
                     self.lines[*line_index].annotation = old_text.clone();
                 }
             }
-            self.modified = true;
+            // No need to set modified flag - is_modified() uses hash comparison
         }
     }
 
@@ -172,7 +192,7 @@ impl Editor {
                 }
             }
             self.history_index += 1;
-            self.modified = true;
+            // No need to set modified flag - is_modified() uses hash comparison
         }
     }
 
@@ -190,9 +210,24 @@ impl Editor {
 
     fn event_loop(&mut self) -> io::Result<()> {
         loop {
-            // Check if diff is available (git repo + tracked file)
+            // Check if diff is available (git repo + tracked file + has actual changes)
             let diff_available = self.file_path.as_ref().map_or(false, |path| {
-                git::is_git_available(path) && git::is_file_tracked(path)
+                if !git::is_git_available(path) || !git::is_file_tracked(path) {
+                    return false;
+                }
+                // Check if there are actual changes between working copy and HEAD
+                if let Ok(head_content) = git::get_head_content(path) {
+                    let working_content: String = self
+                        .lines
+                        .iter()
+                        .map(|line| strip_annotation(&line.content, &self.lang_comment))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let head_trimmed = head_content.trim_end();
+                    working_content != head_trimmed
+                } else {
+                    false
+                }
             });
 
             // Render using both view_mode and editor_state
@@ -203,7 +238,7 @@ impl Editor {
                 &self.view_mode,
                 &self.editor_state,
                 &self.file_path,
-                self.modified,
+                self.is_modified(),
                 self.theme,
                 &self.search_matches,
                 self.current_match,
@@ -243,7 +278,7 @@ impl Editor {
                         )? {
                             event_handler::IdleModeResult::Exit => break,
                             event_handler::IdleModeResult::ShowQuitPrompt => {
-                                if self.modified {
+                                if self.is_modified() {
                                     self.editor_state = EditorState::QuitPrompt;
                                 } else {
                                     break;
@@ -661,30 +696,88 @@ mod tests {
     }
 
     #[test]
-    fn test_modified_flag() {
-        let test_file = "test_modified.txt";
+    fn test_is_modified_hash_based() {
+        let test_file = "test_modified_hash.txt";
         std::fs::write(test_file, "line1").unwrap();
         let mut editor = Editor::new(test_file.to_string()).unwrap();
 
         // Initially not modified
-        assert!(!editor.modified);
+        assert!(!editor.is_modified());
 
-        // Perform action sets modified
+        // Add annotation - now modified
         editor.lines[0].annotation = Some("note".to_string());
         editor.perform_action(crate::models::Action::EditAnnotation {
             line_index: 0,
             old_text: None,
             new_text: Some("note".to_string()),
         });
-        assert!(editor.modified);
+        assert!(editor.is_modified());
 
-        // Save clears modified
+        // Save clears modified state
         editor.save().unwrap();
-        assert!(!editor.modified);
+        assert!(!editor.is_modified());
 
-        // Undo sets modified again
+        // Undo after save - now modified again (different from saved state)
         editor.undo();
-        assert!(editor.modified);
+        assert!(editor.is_modified());
+
+        // Cleanup
+        std::fs::remove_file(test_file).unwrap();
+    }
+
+    #[test]
+    fn test_is_modified_undo_to_original() {
+        let test_file = "test_modified_undo.txt";
+        std::fs::write(test_file, "line1").unwrap();
+        let mut editor = Editor::new(test_file.to_string()).unwrap();
+
+        // Initially not modified
+        assert!(!editor.is_modified());
+
+        // Add annotation - now modified
+        editor.lines[0].annotation = Some("note".to_string());
+        editor.perform_action(crate::models::Action::EditAnnotation {
+            line_index: 0,
+            old_text: None,
+            new_text: Some("note".to_string()),
+        });
+        assert!(editor.is_modified());
+
+        // Undo back to original - should NOT be modified anymore
+        editor.undo();
+        assert!(!editor.is_modified(), "Undoing to original state should not be modified");
+
+        // Cleanup
+        std::fs::remove_file(test_file).unwrap();
+    }
+
+    #[test]
+    fn test_is_modified_add_then_delete_annotation() {
+        let test_file = "test_modified_add_delete.txt";
+        std::fs::write(test_file, "line1").unwrap();
+        let mut editor = Editor::new(test_file.to_string()).unwrap();
+
+        // Initially not modified
+        assert!(!editor.is_modified());
+
+        // Add annotation
+        editor.lines[0].annotation = Some("note".to_string());
+        editor.perform_action(crate::models::Action::EditAnnotation {
+            line_index: 0,
+            old_text: None,
+            new_text: Some("note".to_string()),
+        });
+        assert!(editor.is_modified());
+
+        // Delete annotation (back to original state)
+        editor.lines[0].annotation = None;
+        editor.perform_action(crate::models::Action::EditAnnotation {
+            line_index: 0,
+            old_text: Some("note".to_string()),
+            new_text: None,
+        });
+        // Should NOT be modified - back to original state
+        assert!(!editor.is_modified(), "Deleting annotation to match original should not be modified");
 
         // Cleanup
         std::fs::remove_file(test_file).unwrap();

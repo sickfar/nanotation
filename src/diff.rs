@@ -379,7 +379,7 @@ pub fn calculate_diff(working: &[Line], head_content: &str, comment_style: &str)
 }
 
 /// Strip annotation from a line content.
-fn strip_annotation(content: &str, comment_style: &str) -> String {
+pub fn strip_annotation(content: &str, comment_style: &str) -> String {
     if comment_style.is_empty() {
         // For markdown, annotations are standalone [ANNOTATION]
         if let Some(pos) = content.find("[ANNOTATION]") {

@@ -20,8 +20,10 @@ nanot <file>
 **Key Features:**
 
 -   **Inline Annotations**: Safely add review comments to any line.
+-   **Git Diff View**: Side-by-side comparison with HEAD, word-level highlighting (`^D` to toggle).
 -   **Keyboard Driven**: Efficient navigation (Arrow keys, `^N`/`^P` for jumping between annotations).
 -   **AI Ready**: Designed to work seamlessly with AI Agents (Claude, etc.).
+-   **Smart Change Detection**: Hash-based tracking - undo to original state = no unsaved changes.
 -   **Zero Distraction**: Syntax highlighting, Theme toggling, and Unsaved changes protection.
 
 ## AI Agent Integration
@@ -58,12 +60,25 @@ export EDITOR=nanot
 | `Ctrl` + `X` | Exit (prompts if unsaved) |
 | `Ctrl` + `O` | Save File |
 | `Enter` | **Add/Edit Annotation** |
+| `Del` / `Backspace` | Delete Annotation |
 | `Ctrl` + `N` / `P` | Next / Previous Annotation |
 | `Ctrl` + `Z` / `Y` | Undo / Redo |
-| `Ctrl` + `D` | Delete Annotation |
+| `Ctrl` + `D` | Toggle Diff View (git) |
 | `Ctrl` + `W` | Search |
 | `Ctrl` + `T` | Toggle Theme |
-| `Alt` + `Up`/`Down` | Scroll Page |
+| `Ctrl` + `G` | Show Help |
+| `PgUp` / `PgDn` | Scroll Page |
+| `Home` / `End` | Jump to Start / End |
+
+### Diff View
+
+When editing a file tracked by git, press `Ctrl+D` to toggle a side-by-side diff view:
+- **Left pane**: HEAD version (last committed)
+- **Right pane**: Working copy (current edits)
+- **Word-level highlighting**: Changed words are highlighted within modified lines
+- **Orange indicator**: Status bar shows `^D Diff` when diff is available
+
+The diff view automatically strips annotations when comparing, so you see actual code changes.
 
 ### Annotation Format & Languages
 
