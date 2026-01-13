@@ -33,14 +33,15 @@ nanot <file>
 
 ### Core Design Patterns
 
-1. **State Machine**: Mode-based editor with transitions:
-   - `Normal` → `Annotating` → `Search` → `QuitPrompt` → `Help`
-   - Defined in `models.rs::Mode` enum
+1. **Separated View/State Architecture**:
+   - `ViewMode`: How the main content area is rendered (Normal vs Diff split-pane)
+   - `EditorState`: What input mode the user is in (Idle, Annotating, Searching, etc.)
+   - Defined in `models.rs` - these two dimensions are independent
 
 2. **Event-Driven Architecture**:
    - Crossterm event loop in `editor.rs::run()`
-   - Event processing in `event_handler.rs` (643 lines)
-   - Debounced rendering in `ui.rs` (490 lines)
+   - Event processing in `event_handler.rs`
+   - Debounced rendering in `ui.rs` and `ui_diff.rs`
 
 3. **Undo/Redo System**:
    - Action history tracking via `models.rs::Action` enum
@@ -54,17 +55,21 @@ nanot <file>
 
 ### Module Responsibilities
 
-| Module | Lines | Responsibility |
-|--------|-------|----------------|
-| `event_handler.rs` | 643 | Keyboard input processing; mode transitions; annotation editing |
-| `ui.rs` | 490 | Terminal rendering; line numbers; gutter; annotation display |
-| `editor.rs` | 380 | Editor state management; run loop; save/load; undo/redo |
-| `text.rs` | 284 | Unicode-aware text wrapping with whitespace preservation |
-| `file.rs` | 259 | File I/O; language detection; annotation parsing/serialization |
-| `highlighting.rs` | 176 | Syntax highlighting integration with syntect |
-| `theme.rs` | 71 | Dark/Light color schemes |
-| `models.rs` | 22 | Core data structures: `Line`, `Mode`, `Action` |
-| `main.rs` | 50 | CLI argument parsing; editor initialization |
+| Module | Responsibility |
+|--------|----------------|
+| `event_handler.rs` | Keyboard input processing; mode transitions; annotation editing |
+| `ui.rs` | Terminal rendering; line numbers; gutter; annotation display |
+| `ui_diff.rs` | Diff mode split-pane rendering; synchronized scrolling |
+| `editor.rs` | Editor state management; run loop; save/load; undo/redo |
+| `diff.rs` | Git diff computation; word-level diff highlighting; alignment |
+| `git.rs` | Git repository operations; HEAD content retrieval |
+| `navigation.rs` | Cursor movement; scroll management; annotation jumping; search |
+| `text.rs` | Unicode-aware text wrapping with whitespace preservation |
+| `file.rs` | File I/O; language detection; annotation parsing/serialization |
+| `highlighting.rs` | Syntax highlighting integration with syntect |
+| `theme.rs` | Dark/Light color schemes including diff colors |
+| `models.rs` | Core data structures: `Line`, `ViewMode`, `EditorState`, `Action` |
+| `main.rs` | CLI argument parsing; editor initialization |
 
 ### Key Data Structures
 
@@ -75,12 +80,19 @@ pub struct Line {
     pub annotation: Option<String>,
 }
 
-pub enum Mode {
+/// How the main content area is rendered
+pub enum ViewMode {
     Normal,
+    Diff { diff_result: DiffResult },
+}
+
+/// What input mode the user is in (independent of view)
+pub enum EditorState {
+    Idle,
     Annotating { buffer: String, cursor_pos: usize },
-    Search { query: String, cursor_pos: usize },
+    Searching { query: String, cursor_pos: usize },
+    ShowingHelp,
     QuitPrompt,
-    Help,
 }
 
 pub enum Action {
@@ -96,7 +108,8 @@ pub struct Editor {
     pub lines: Vec<Line>,
     pub cursor_line: usize,
     pub scroll_offset: usize,
-    pub mode: Mode,
+    pub view_mode: ViewMode,
+    pub editor_state: EditorState,
     pub file_path: Option<String>,
     pub modified: bool,
     pub theme: Theme,
@@ -141,10 +154,9 @@ The `PROMPT.md` file contains formal instructions for AI agents to process `[ANN
 
 ## Testing Notes
 
-- **Limited Coverage**: Only 2 unit tests in `theme.rs` (Dark/Light theme color verification)
-- No integration tests or end-to-end tests
+- **Comprehensive unit tests**: ~193 tests covering diff, navigation, event handling, git operations
 - CI runs `cargo test --verbose` on push/PR to main
-- When adding features, consider adding tests despite the current sparse coverage
+- Key test modules: `diff::*`, `navigation::*`, `event_handler::tests`, `git::tests`
 
 ## Common Development Patterns
 
@@ -172,3 +184,24 @@ The `PROMPT.md` file contains formal instructions for AI agents to process `[ANN
 - **Single File Editing**: No multi-file support or file browser
 - **Terminal Only**: No GUI; requires terminal with ANSI color support
 - **History Granularity**: Undo/redo only tracks annotation edits, not cursor movements
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Enter` | Add/Edit annotation on current line |
+| `Del` / `Backspace` | Delete annotation on current line |
+| `Ctrl+D` | Toggle diff view (if git diff available) |
+| `Ctrl+N` / `Ctrl+P` | Jump to next/previous annotation |
+| `Ctrl+W` | Enter search mode |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
+| `Ctrl+O` | Save file |
+| `Ctrl+X` | Exit (with save prompt if modified) |
+| `Ctrl+T` | Toggle dark/light theme |
+| `Ctrl+G` | Show help overlay |
+| `Esc` | Cancel current action / Exit diff view |
+| `↑` / `↓` | Navigate lines |
+| `PgUp` / `PgDn` | Page navigation |
+| `Home` / `End` | Jump to start/end of file |
+
+**Note**: When diff is available (git repo + tracked file), an orange `^D Diff` indicator appears in the status bar.

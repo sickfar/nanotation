@@ -32,6 +32,7 @@ pub fn render(
     highlighter: &SyntaxHighlighter,
     status_message: Option<&str>,
     lang_comment: &str,
+    diff_available: bool,
 ) -> io::Result<()> {
     // Check if we're in diff view mode
     if let ViewMode::Diff { diff_result } = view_mode {
@@ -48,6 +49,7 @@ pub fn render(
             highlighter,
             status_message,
             lang_comment,
+            diff_available,
         );
     }
     let (width, height) = terminal::size()?;
@@ -216,6 +218,7 @@ pub fn render(
         width,
         height,
         status_message,
+        diff_available,
     )?;
 
     // Show help overlay if in ShowingHelp state
@@ -332,52 +335,128 @@ fn render_status_bar(
     width: u16,
     height: u16,
     status_message: Option<&str>,
+    diff_available: bool,
 ) -> io::Result<()> {
-    // If there's a status message, show it instead
-    let status = if let Some(msg) = status_message {
-        format!(" {}", msg)
-    } else {
-        // Status bar content depends on editor_state (NOT view_mode)
-        match editor_state {
-            EditorState::Idle => {
-                let modified_flag = if modified { " [Modified]" } else { "" };
-                let file = file_path.as_deref().unwrap_or("[No Name]");
-                let view_indicator = if matches!(view_mode, ViewMode::Diff { .. }) {
-                    "DIFF | "
-                } else {
-                    ""
-                };
-                format!(" {}{} | Line {}/{}{}  ^G Help  ^X Exit  ^O Save  ^W Search  ^K Diff  ^T Theme  ^D Del  ^N/^P Jump  ^Z/^Y Undo/Redo",
-                    view_indicator, file, cursor_line + 1, total_lines, modified_flag)
-            }
-            EditorState::Annotating { .. } => {
-                " Enter: Save  Esc: Cancel  ←→: Move cursor  ↑↓: Navigate lines".to_string()
-            }
-            EditorState::Searching { query, .. } => {
-                let matches = if !search_matches.is_empty() {
-                    format!(" ({}/{})", current_match.map(|i| i + 1).unwrap_or(0), search_matches.len())
-                } else {
-                    String::new()
-                };
-                format!(" Search: {}█{}  Enter: Next  Esc: Cancel", query, matches)
-            }
-            EditorState::QuitPrompt => {
-                " Unsaved changes! Save before exiting? (y/n/Esc)".to_string()
-            }
-            EditorState::ShowingHelp => {
-                " Help Mode - Press any key to return".to_string()
-            }
-        }
-    };
+    queue!(stdout, MoveTo(0, height - 1))?;
 
-    queue!(
-        stdout,
-        MoveTo(0, height - 1),
-        SetBackgroundColor(colors.status_bg),
-        SetForegroundColor(colors.status_fg),
-        Print(format!("{:width$}", status.chars().take(width as usize - 1).collect::<String>(), width = width as usize - 1)),
-        ResetColor
-    )?;
+    // If there's a status message, show it simply
+    if let Some(msg) = status_message {
+        queue!(
+            stdout,
+            SetBackgroundColor(colors.status_bg),
+            SetForegroundColor(colors.status_fg),
+            Print(format!(" {:width$}", msg, width = width as usize - 2)),
+            ResetColor
+        )?;
+        return Ok(());
+    }
+
+    // Status bar content depends on editor_state
+    match editor_state {
+        EditorState::Idle => {
+            // Extract just the filename from path
+            let filename = file_path
+                .as_deref()
+                .map(|p| Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(p))
+                .unwrap_or("[No Name]");
+            let modified_flag = if modified { " [Modified]" } else { "" };
+            let view_indicator = if matches!(view_mode, ViewMode::Diff { .. }) {
+                "DIFF | "
+            } else {
+                ""
+            };
+
+            // Build the left part: filename and line info
+            let left_part = format!(
+                " {}{}{} | Line {}/{}",
+                view_indicator, filename, modified_flag, cursor_line + 1, total_lines
+            );
+
+            // Render left part with normal status colors
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(&left_part),
+            )?;
+
+            // If diff is available, show the orange indicator with a space before it
+            if diff_available {
+                let diff_indicator = " ^D Diff ";
+                queue!(
+                    stdout,
+                    SetBackgroundColor(colors.status_bg),
+                    Print(" "),
+                    SetBackgroundColor(colors.diff_indicator_bg),
+                    SetForegroundColor(colors.diff_indicator_fg),
+                    Print(diff_indicator),
+                )?;
+            }
+
+            // Continue with the rest of the shortcuts
+            let shortcuts = " ^G Help  ^X Exit  ^O Save  ^W Search  ^T Theme  Del/Bksp Del  ^N/^P Jump";
+            let current_len = left_part.len() + if diff_available { 10 } else { 0 }; // " " + " ^D Diff "
+            let remaining_width = (width as usize).saturating_sub(current_len + 1);
+            let shortcuts_truncated: String = shortcuts.chars().take(remaining_width).collect();
+
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(&shortcuts_truncated),
+            )?;
+
+            // Fill remaining space
+            let total_len = current_len + shortcuts_truncated.len();
+            let padding = (width as usize).saturating_sub(total_len);
+            if padding > 0 {
+                queue!(stdout, Print(format!("{:width$}", "", width = padding)))?;
+            }
+            queue!(stdout, ResetColor)?;
+        }
+        EditorState::Annotating { .. } => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Enter: Save  Esc: Cancel  ←→: Move cursor  ↑↓: Navigate lines", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+        EditorState::Searching { query, .. } => {
+            let matches = if !search_matches.is_empty() {
+                format!(" ({}/{})", current_match.map(|i| i + 1).unwrap_or(0), search_matches.len())
+            } else {
+                String::new()
+            };
+            let search_status = format!("Search: {}█{}  Enter: Next  Esc: Cancel", query, matches);
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", search_status, width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+        EditorState::QuitPrompt => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Unsaved changes! Save before exiting? (y/n/Esc)", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+        EditorState::ShowingHelp => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Help Mode - Press any key to return", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+    }
 
     Ok(())
 }
@@ -494,14 +573,14 @@ fn render_help_overlay(
         " HELP MENU ",
         "",
         " ^N / ^P    Next / Prev Annotation",
-        " ^D         Delete Annotation",
+        " Del/Bksp   Delete Annotation",
         " Enter      Add / Edit Annotation",
         " ^W         Search",
+        " ^D         Toggle Diff View",
         " ^T         Toggle Theme",
         " ^O         Save File",
         " ^X         Exit",
         " ^G         Toggle Help",
-        " ^K         Toggle Diff View",
         "",
         " Arrow Keys Navigation",
         " PgUp/PgDn  Page Navigation",

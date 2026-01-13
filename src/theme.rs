@@ -25,6 +25,9 @@ pub struct ColorScheme {
     // Diff cursor colors (when cursor is on a diff line)
     pub diff_added_selected_bg: Color,
     pub diff_removed_selected_bg: Color,
+    // Diff indicator in status bar
+    pub diff_indicator_bg: Color,
+    pub diff_indicator_fg: Color,
 }
 
 impl Theme {
@@ -81,6 +84,13 @@ impl Theme {
                     g: 50,
                     b: 50,
                 },
+                // Orange indicator for diff availability
+                diff_indicator_bg: Color::Rgb {
+                    r: 200,
+                    g: 120,
+                    b: 50,
+                },
+                diff_indicator_fg: Color::Black,
             },
             Theme::Light => ColorScheme {
                 bg: Color::White,
@@ -149,6 +159,13 @@ impl Theme {
                     g: 180,
                     b: 180,
                 },
+                // Orange indicator for diff availability
+                diff_indicator_bg: Color::Rgb {
+                    r: 230,
+                    g: 140,
+                    b: 60,
+                },
+                diff_indicator_fg: Color::Black,
             },
         }
     }

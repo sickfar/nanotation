@@ -81,8 +81,8 @@ pub fn handle_idle_mode(
         (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
             return Ok(IdleModeResult::ShowHelp);
         }
-        // Toggle diff view (Ctrl+K)
-        (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+        // Toggle diff view (Ctrl+D)
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
             return Ok(IdleModeResult::ToggleDiffView);
         }
         // Undo (Ctrl+Z)
@@ -93,8 +93,8 @@ pub fn handle_idle_mode(
         (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
             return Ok(IdleModeResult::Redo);
         }
-        // Delete annotation (Ctrl+D)
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+        // Delete annotation (Delete or Backspace key)
+        (KeyCode::Delete, _) | (KeyCode::Backspace, _) => {
             if let Some(old_text) = &lines[*cursor_line].annotation {
                 return Ok(IdleModeResult::Action(Action::EditAnnotation {
                     line_index: *cursor_line,
@@ -723,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn test_idle_mode_ctrl_d_deletes_annotation() {
+    fn test_idle_mode_delete_removes_annotation() {
         let mut lines = vec![
             Line { content: "line1".to_string(), annotation: Some("test".to_string()) },
         ];
@@ -734,7 +734,7 @@ mod tests {
         let mut scroll_offset = 0;
 
         let result = handle_idle_mode(
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
             &mut lines,
             &mut cursor_line,
             &view_mode,
@@ -747,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn test_idle_mode_ctrl_k_toggles_diff() {
+    fn test_idle_mode_ctrl_d_toggles_diff() {
         let mut lines = vec![
             Line { content: "line1".to_string(), annotation: None },
         ];
@@ -758,7 +758,7 @@ mod tests {
         let mut scroll_offset = 0;
 
         let result = handle_idle_mode(
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
             &mut lines,
             &mut cursor_line,
             &view_mode,
@@ -885,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_view_ctrl_d_deletes_annotation() {
+    fn test_diff_view_delete_removes_annotation() {
         let mut lines = vec![
             Line { content: "line1".to_string(), annotation: Some("test".to_string()) },
         ];
@@ -903,7 +903,7 @@ mod tests {
         let mut scroll_offset = 0;
 
         let result = handle_idle_mode(
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
             &mut lines,
             &mut cursor_line,
             &view_mode,
@@ -978,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_view_ctrl_k_toggles_diff() {
+    fn test_diff_view_ctrl_d_toggles_diff() {
         let mut lines = vec![
             Line { content: "line1".to_string(), annotation: None },
         ];
@@ -996,7 +996,7 @@ mod tests {
         let mut scroll_offset = 0;
 
         let result = handle_idle_mode(
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
             &mut lines,
             &mut cursor_line,
             &view_mode,

@@ -190,6 +190,11 @@ impl Editor {
 
     fn event_loop(&mut self) -> io::Result<()> {
         loop {
+            // Check if diff is available (git repo + tracked file)
+            let diff_available = self.file_path.as_ref().map_or(false, |path| {
+                git::is_git_available(path) && git::is_file_tracked(path)
+            });
+
             // Render using both view_mode and editor_state
             ui::render(
                 &self.lines,
@@ -206,6 +211,7 @@ impl Editor {
                 &self.highlighter,
                 self.status_message.as_deref(),
                 &self.lang_comment,
+                diff_available,
             )?;
 
             // Clear status message after displaying
