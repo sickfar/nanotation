@@ -124,6 +124,18 @@ impl Editor {
             git::GitError::Git(_) => DIFF_NO_REPO_ERROR,
         })?;
 
+        // Check if there are actual changes between working copy and HEAD
+        let working_content: String = self
+            .lines
+            .iter()
+            .map(|line| strip_annotation(&line.content, &self.lang_comment))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let head_trimmed = head_content.trim_end();
+        if working_content == head_trimmed {
+            return Err("No changes to show");
+        }
+
         // Calculate diff
         let diff_result = calculate_diff(&self.lines, &head_content, &self.lang_comment);
 

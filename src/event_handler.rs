@@ -3,13 +3,49 @@ use crate::diff::adjust_diff_scroll;
 use crate::models::{Action, Line, ViewMode};
 use crate::navigation::{
     adjust_annotation_scroll_pure, adjust_normal_scroll, find_matches, find_next_annotation,
-    find_prev_annotation, move_cursor_down_in_wrapped, move_cursor_up_in_wrapped,
+    find_next_word_boundary, find_prev_annotation, find_prev_word_boundary,
+    move_cursor_down_in_wrapped, move_cursor_up_in_wrapped,
 };
 use crossterm::{
     event::{KeyCode, KeyEvent, KeyModifiers},
     terminal,
 };
 use std::io;
+
+// ============================================================================
+// Multi-Hotkey Helper for Keyboard Layout Independence
+// ============================================================================
+
+/// Check if a key event matches Ctrl+<one of the alternatives>.
+/// This enables hotkeys to work across different keyboard layouts (EN/RU/CN/etc.).
+///
+/// For example, matches_ctrl_key(&key, &['x', 'ч']) will return true if:
+/// - English layout: Ctrl+X pressed (produces 'x')
+/// - Russian layout: Ctrl+X physical key pressed (produces 'ч')
+fn matches_ctrl_key(key: &KeyEvent, alternatives: &[char]) -> bool {
+    if key.modifiers != KeyModifiers::CONTROL {
+        return false;
+    }
+    if let KeyCode::Char(c) = key.code {
+        alternatives.contains(&c)
+    } else {
+        false
+    }
+}
+
+/// Check if a key code matches one of the character alternatives.
+/// Case-insensitive: converts to lowercase before checking.
+fn matches_char(key_code: &KeyCode, alternatives: &[char]) -> bool {
+    if let KeyCode::Char(c) = key_code {
+        let c_lower = c.to_lowercase().next().unwrap_or(*c);
+        alternatives.iter().any(|&alt| {
+            let alt_lower = alt.to_lowercase().next().unwrap_or(alt);
+            c_lower == alt_lower
+        })
+    } else {
+        false
+    }
+}
 
 // ============================================================================
 // New Unified Architecture: IdleModeResult + handle_idle_mode
@@ -55,44 +91,66 @@ pub fn handle_idle_mode(
     annotation_scroll: &mut usize,
     scroll_offset: &mut usize,
 ) -> io::Result<IdleModeResult> {
+    // Check Ctrl+char hotkeys with multi-layout support first
+    // Quit (Ctrl+X): English 'x', Russian 'ч'
+    if matches_ctrl_key(&key, &['x', 'ч']) {
+        // Caller checks if modified and decides between Exit and ShowQuitPrompt
+        return Ok(IdleModeResult::ShowQuitPrompt);
+    }
+    // Save (Ctrl+O): English 'o', Russian 'щ'
+    if matches_ctrl_key(&key, &['o', 'щ']) {
+        // Caller handles save directly
+        return Ok(IdleModeResult::Continue);
+    }
+    // Search (Ctrl+W): English 'w', Russian 'ц'
+    if matches_ctrl_key(&key, &['w', 'ц']) {
+        return Ok(IdleModeResult::EnterSearch);
+    }
+    // Toggle theme (Ctrl+T): English 't', Russian 'е'
+    if matches_ctrl_key(&key, &['t', 'е']) {
+        *theme = match *theme {
+            crate::theme::Theme::Dark => crate::theme::Theme::Light,
+            crate::theme::Theme::Light => crate::theme::Theme::Dark,
+        };
+        return Ok(IdleModeResult::Continue);
+    }
+    // Help (Ctrl+G): English 'g', Russian 'п'
+    if matches_ctrl_key(&key, &['g', 'п']) {
+        return Ok(IdleModeResult::ShowHelp);
+    }
+    // Toggle diff view (Ctrl+D): English 'd', Russian 'в'
+    if matches_ctrl_key(&key, &['d', 'в']) {
+        return Ok(IdleModeResult::ToggleDiffView);
+    }
+    // Undo (Ctrl+Z): English 'z', Russian 'я'
+    if matches_ctrl_key(&key, &['z', 'я']) {
+        return Ok(IdleModeResult::Undo);
+    }
+    // Redo (Ctrl+Y): English 'y', Russian 'н'
+    if matches_ctrl_key(&key, &['y', 'н']) {
+        return Ok(IdleModeResult::Redo);
+    }
+    // Next annotation (Ctrl+N): English 'n', Russian 'т'
+    if matches_ctrl_key(&key, &['n', 'т']) {
+        if let Some(next) = find_next_annotation(lines, *cursor_line) {
+            *cursor_line = next;
+            *annotation_scroll = 0;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+        }
+        return Ok(IdleModeResult::Continue);
+    }
+    // Previous annotation (Ctrl+P): English 'p', Russian 'з'
+    if matches_ctrl_key(&key, &['p', 'з']) {
+        if let Some(prev) = find_prev_annotation(lines, *cursor_line) {
+            *cursor_line = prev;
+            *annotation_scroll = 0;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+        }
+        return Ok(IdleModeResult::Continue);
+    }
+
+    // Non-Ctrl hotkeys use match as before
     match (key.code, key.modifiers) {
-        // Quit (Ctrl+X)
-        (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
-            // Caller checks if modified and decides between Exit and ShowQuitPrompt
-            return Ok(IdleModeResult::ShowQuitPrompt);
-        }
-        // Save (Ctrl+O) - handled by caller
-        (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
-            // Caller handles save directly
-            return Ok(IdleModeResult::Continue);
-        }
-        // Search (Ctrl+W)
-        (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
-            return Ok(IdleModeResult::EnterSearch);
-        }
-        // Toggle theme (Ctrl+T)
-        (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
-            *theme = match *theme {
-                crate::theme::Theme::Dark => crate::theme::Theme::Light,
-                crate::theme::Theme::Light => crate::theme::Theme::Dark,
-            };
-        }
-        // Help (Ctrl+G)
-        (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
-            return Ok(IdleModeResult::ShowHelp);
-        }
-        // Toggle diff view (Ctrl+D)
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-            return Ok(IdleModeResult::ToggleDiffView);
-        }
-        // Undo (Ctrl+Z)
-        (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
-            return Ok(IdleModeResult::Undo);
-        }
-        // Redo (Ctrl+Y)
-        (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
-            return Ok(IdleModeResult::Redo);
-        }
         // Delete annotation (Delete or Backspace key)
         (KeyCode::Delete, _) | (KeyCode::Backspace, _) => {
             if let Some(old_text) = &lines[*cursor_line].annotation {
@@ -101,22 +159,6 @@ pub fn handle_idle_mode(
                     old_text: Some(old_text.clone()),
                     new_text: None,
                 }));
-            }
-        }
-        // Next annotation (Ctrl+N)
-        (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-            if let Some(next) = find_next_annotation(lines, *cursor_line) {
-                *cursor_line = next;
-                *annotation_scroll = 0;
-                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
-            }
-        }
-        // Previous annotation (Ctrl+P)
-        (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-            if let Some(prev) = find_prev_annotation(lines, *cursor_line) {
-                *cursor_line = prev;
-                *annotation_scroll = 0;
-                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
             }
         }
         // Page Up
@@ -250,23 +292,36 @@ pub fn handle_annotation_input(
             move_cursor_down(buffer, cursor_pos, annotation_scroll)?;
         }
         KeyCode::Char(c) => {
-            buffer.insert(*cursor_pos, c);
+            // Convert character index to byte index for string operations
+            let byte_idx = buffer.chars().take(*cursor_pos).map(|c| c.len_utf8()).sum();
+            buffer.insert(byte_idx, c);
             *cursor_pos += 1;
             adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
         }
         KeyCode::Backspace => {
             if *cursor_pos > 0 {
                 *cursor_pos -= 1;
-                buffer.remove(*cursor_pos);
+                // Convert character index to byte index for string operations
+                let byte_idx = buffer.chars().take(*cursor_pos).map(|c| c.len_utf8()).sum();
+                buffer.remove(byte_idx);
                 adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
             }
+        }
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+            *cursor_pos = find_prev_word_boundary(buffer, *cursor_pos);
+            adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
+        }
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+            *cursor_pos = find_next_word_boundary(buffer, *cursor_pos);
+            adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
         }
         KeyCode::Left => {
             *cursor_pos = cursor_pos.saturating_sub(1);
             adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
         }
         KeyCode::Right => {
-            *cursor_pos = (*cursor_pos + 1).min(buffer.len());
+            // Use character count, not byte length
+            *cursor_pos = (*cursor_pos + 1).min(buffer.chars().count());
             adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
         }
         KeyCode::Home => {
@@ -274,7 +329,8 @@ pub fn handle_annotation_input(
             adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
         }
         KeyCode::End => {
-            *cursor_pos = buffer.len();
+            // Use character count, not byte length
+            *cursor_pos = buffer.chars().count();
             adjust_annotation_scroll(buffer, *cursor_pos, annotation_scroll)?;
         }
         _ => {}
@@ -358,12 +414,19 @@ pub enum QuitPromptResult {
 }
 
 pub fn handle_quit_prompt(key: KeyEvent) -> QuitPromptResult {
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => QuitPromptResult::SaveAndExit,
-        KeyCode::Char('n') | KeyCode::Char('N') => QuitPromptResult::Exit,
-        KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => QuitPromptResult::Cancel,
-        _ => QuitPromptResult::Continue,
+    // Yes: English 'y', Russian 'н' (QWERTY Y key position)
+    if matches_char(&key.code, &['y', 'н']) {
+        return QuitPromptResult::SaveAndExit;
     }
+    // No: English 'n', Russian 'т' (QWERTY N key position)
+    if matches_char(&key.code, &['n', 'т']) {
+        return QuitPromptResult::Exit;
+    }
+    // Cancel: English 'c', Russian 'с' (QWERTY C key position), or Esc
+    if key.code == KeyCode::Esc || matches_char(&key.code, &['c', 'с']) {
+        return QuitPromptResult::Cancel;
+    }
+    QuitPromptResult::Continue
 }
 
 // ============================================================================
@@ -467,6 +530,63 @@ mod tests {
     use crate::models::Line;
     use crate::diff::{DiffResult, DiffLine, LineChange};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    // Tests for matches_char helper
+    #[test]
+    fn test_matches_char_lowercase() {
+        assert!(matches_char(&KeyCode::Char('y'), &['y', 'н']));
+    }
+
+    #[test]
+    fn test_matches_char_uppercase() {
+        assert!(matches_char(&KeyCode::Char('Y'), &['y', 'н']));
+    }
+
+    #[test]
+    fn test_matches_char_cyrillic() {
+        assert!(matches_char(&KeyCode::Char('н'), &['y', 'н']));
+    }
+
+    #[test]
+    fn test_matches_char_no_match() {
+        assert!(!matches_char(&KeyCode::Char('x'), &['y', 'н']));
+    }
+
+    #[test]
+    fn test_matches_char_not_char_keycode() {
+        assert!(!matches_char(&KeyCode::Enter, &['y', 'н']));
+    }
+
+    // Tests for matches_ctrl_key helper
+    #[test]
+    fn test_matches_ctrl_key_latin() {
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert!(matches_ctrl_key(&key, &['x', 'ч']));
+    }
+
+    #[test]
+    fn test_matches_ctrl_key_cyrillic() {
+        let key = KeyEvent::new(KeyCode::Char('ч'), KeyModifiers::CONTROL);
+        assert!(matches_ctrl_key(&key, &['x', 'ч']));
+    }
+
+    #[test]
+    fn test_matches_ctrl_key_no_match() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert!(!matches_ctrl_key(&key, &['x', 'ч']));
+    }
+
+    #[test]
+    fn test_matches_ctrl_key_no_modifier() {
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(!matches_ctrl_key(&key, &['x', 'ч']));
+    }
+
+    #[test]
+    fn test_matches_ctrl_key_wrong_keycode_type() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
+        assert!(!matches_ctrl_key(&key, &['x', 'ч']));
+    }
 
     // Helper for testing with fixed width
     fn adjust_annotation_scroll_with_width(
@@ -1030,6 +1150,51 @@ mod tests {
         assert!(matches!(result, QuitPromptResult::Cancel));
     }
 
+    #[test]
+    fn test_quit_prompt_uppercase_y() {
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::SaveAndExit));
+    }
+
+    #[test]
+    fn test_quit_prompt_uppercase_n() {
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::Exit));
+    }
+
+    #[test]
+    fn test_quit_prompt_russian_yes() {
+        // Russian 'н' (QWERTY Y key position)
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('н'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::SaveAndExit));
+    }
+
+    #[test]
+    fn test_quit_prompt_russian_no() {
+        // Russian 'т' (QWERTY N key position)
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('т'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::Exit));
+    }
+
+    #[test]
+    fn test_quit_prompt_russian_cancel() {
+        // Russian 'с' (QWERTY C key position)
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('с'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::Cancel));
+    }
+
+    #[test]
+    fn test_quit_prompt_c_cancels() {
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::Cancel));
+    }
+
+    #[test]
+    fn test_quit_prompt_uppercase_c_cancels() {
+        let result = handle_quit_prompt(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE));
+        assert!(matches!(result, QuitPromptResult::Cancel));
+    }
+
     // ========================================================================
     // Annotation Mode Tests
     // ========================================================================
@@ -1120,6 +1285,406 @@ mod tests {
         assert!(matches!(result, AnnotationModeResult::Continue));
         assert_eq!(buffer, "tes");
         assert_eq!(cursor_pos, 3);
+    }
+
+    #[test]
+    fn test_annotation_input_cyrillic_char() {
+        // Test inserting Cyrillic character (multi-byte UTF-8)
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Hello".to_string();
+        let mut cursor_pos = buffer.chars().count(); // 5 characters
+        let mut annotation_scroll = 0;
+
+        // Insert Russian 'в' (2 bytes in UTF-8)
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Char('в'), KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(buffer, "Helloв");
+        assert_eq!(cursor_pos, 6); // Character count, not byte count
+    }
+
+    #[test]
+    fn test_annotation_input_emoji() {
+        // Test inserting emoji (4 bytes in UTF-8)
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Test".to_string();
+        let mut cursor_pos = buffer.chars().count(); // 4 characters
+        let mut annotation_scroll = 0;
+
+        // Insert emoji 🎉 (4 bytes)
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Char('🎉'), KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(buffer, "Test🎉");
+        assert_eq!(cursor_pos, 5); // 5 characters total
+    }
+
+    #[test]
+    fn test_annotation_input_backspace_cyrillic() {
+        // Test backspace with Cyrillic character
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Helloв".to_string(); // 'в' is 2 bytes
+        let mut cursor_pos = buffer.chars().count(); // 6 characters
+        let mut annotation_scroll = 0;
+
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(buffer, "Hello");
+        assert_eq!(cursor_pos, 5);
+    }
+
+    #[test]
+    fn test_annotation_input_mixed_multibyte() {
+        // Test inserting multiple multi-byte characters in sequence
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = String::new();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Insert Russian "Привет" character by character
+        for c in "Привет".chars() {
+            handle_annotation_input(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut buffer,
+                &mut cursor_pos,
+                &lines,
+                0,
+                &mut annotation_scroll,
+            ).unwrap();
+        }
+
+        assert_eq!(buffer, "Привет");
+        assert_eq!(cursor_pos, 6); // 6 characters
+        assert_eq!(buffer.len(), 12); // 12 bytes (each Cyrillic char is 2 bytes)
+    }
+
+    #[test]
+    fn test_annotation_input_right_arrow_with_cyrillic() {
+        // Test Right arrow key with Cyrillic text
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Привет".to_string(); // 6 chars, 12 bytes
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Move to end
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(cursor_pos, 6); // Should be character count, not byte length
+
+        // Move right should stay at end
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 6); // Should still be at end
+    }
+
+    #[test]
+    fn test_annotation_input_insert_middle_cyrillic() {
+        // Test inserting character in middle of Cyrillic text
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "При".to_string(); // 3 Cyrillic chars
+        let mut cursor_pos = 2; // After "Пр"
+        let mut annotation_scroll = 0;
+
+        // Insert 'и'
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Char('и'), KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(buffer, "Прии");
+        assert_eq!(cursor_pos, 3);
+    }
+
+    // ========================================================================
+    // Alt+Left/Alt+Right Word Navigation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_annotation_input_alt_right_basic() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "hello world foo".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right from start
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(cursor_pos, 6); // Jump to "world"
+    }
+
+    #[test]
+    fn test_annotation_input_alt_left_basic() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "hello world foo".to_string();
+        let mut cursor_pos = 15; // At end
+        let mut annotation_scroll = 0;
+
+        // Alt+Left from end
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(cursor_pos, 12); // Jump to "foo"
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_cyrillic() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Привет мир тест".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right through Cyrillic text
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 7); // After "Привет "
+
+        // Continue to next word
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 11); // After "мир "
+
+        // Alt+Left to go back
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 7); // Back to "мир"
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_with_punctuation() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "TODO: fix bug".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right skips boundaries and jumps to next word
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 6); // Jump to "fix" (skip "TODO:" and space)
+
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 10); // Jump to "bug" (skip space)
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_mixed_unicode() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Fix функцию get_data() error".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right through mixed English/Cyrillic
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(cursor_pos > 0); // Moved forward
+
+        // Continue navigating
+        let mut count = 0;
+        while cursor_pos < buffer.chars().count() && count < 10 {
+            handle_annotation_input(
+                KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+                &mut buffer,
+                &mut cursor_pos,
+                &lines,
+                0,
+                &mut annotation_scroll,
+            ).unwrap();
+            count += 1;
+        }
+
+        // Should reach end without panic
+        assert_eq!(cursor_pos, buffer.chars().count());
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_emoji() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "Done 🎉 success".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Right past emoji
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 5); // After "Done "
+
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 7); // After "🎉 "
+    }
+
+    #[test]
+    fn test_annotation_input_word_nav_at_boundaries() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "hello".to_string();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Alt+Left at start should stay at start
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, 0);
+
+        // Jump to end
+        cursor_pos = buffer.chars().count();
+
+        // Alt+Right at end should stay at end
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert_eq!(cursor_pos, buffer.chars().count());
     }
 
     // ========================================================================

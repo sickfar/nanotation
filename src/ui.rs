@@ -129,7 +129,7 @@ pub fn render(
                 stdout,
                 MoveTo(0, screen_line as u16),
                 SetBackgroundColor(colors.bg),
-                SetForegroundColor(colors.status_fg),
+                SetForegroundColor(colors.line_number_fg),
                 Print(line_num_str),
                 SetBackgroundColor(bg_color),
             )?;
@@ -297,12 +297,15 @@ fn render_annotation_area(
 
         let y_pos = annotation_start + 1 + i as u16;
         
+        // Calculate manual padding for proper wide character handling
+        use crate::text::calculate_padding;
+        let padding = calculate_padding(&display_line, max_annotation_width);
         queue!(
             stdout,
             MoveTo(0, y_pos),
             SetBackgroundColor(colors.annotation_window_bg),
             SetForegroundColor(colors.annotation_window_fg),
-            Print(format!("║ {:width$} ║", display_line, width = max_annotation_width)),
+            Print(format!("║ {}{}║", display_line, " ".repeat(padding))),
             ResetColor
         )?;
     }
@@ -397,7 +400,9 @@ fn render_status_bar(
             let shortcuts = " ^G Help  ^X Exit  ^O Save  ^W Search  ^T Theme  Del/Bksp Del  ^N/^P Jump";
             let current_len = left_part.len() + if diff_available { 10 } else { 0 }; // " " + " ^D Diff "
             let remaining_width = (width as usize).saturating_sub(current_len + 1);
-            let shortcuts_truncated: String = shortcuts.chars().take(remaining_width).collect();
+            // Use truncate_to_width for proper handling of wide characters
+            use crate::text::truncate_to_width;
+            let shortcuts_truncated = truncate_to_width(shortcuts, remaining_width);
 
             queue!(
                 stdout,
@@ -513,8 +518,11 @@ fn position_cursor(
     } else {
         ""
     };
-    
-    let cursor_x = 2 + cursor_col.min(display_line.chars().count());
+
+    // Convert character index to visual column for proper cursor positioning with wide chars
+    use crate::text::char_index_to_visual_col;
+    let cursor_visual_col = char_index_to_visual_col(display_line, cursor_col);
+    let cursor_x = 2 + cursor_visual_col;
     
     queue!(
         stdout,
@@ -533,7 +541,7 @@ fn render_help_overlay(
 ) -> io::Result<()> {
     // Center the box
     let box_width = 50;
-    let box_height = 18;
+    let box_height = 20; // Increased for multi-layout note
     let start_x = (width.saturating_sub(box_width)) / 2;
     let start_y = (height.saturating_sub(box_height)) / 2;
 
@@ -585,6 +593,7 @@ fn render_help_overlay(
         " Arrow Keys Navigation",
         " PgUp/PgDn  Page Navigation",
         "",
+        " Hotkeys work in EN/RU layouts",
         " Press Any Key to Close",
     ];
 

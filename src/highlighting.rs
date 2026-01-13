@@ -36,13 +36,13 @@ fn create_zenbones_dark() -> Theme {
     // Using official palette derived from Alabaster Light where possible, adapted for Dark BG.
     let bg = Color { r: 14, g: 20, b: 21, a: 255 };      // #0e1415
     let fg = Color { r: 206, g: 206, b: 206, a: 255 };   // #cecece
-    
+
     // Strict Alabaster Palette (from Alabaster.sublime-color-scheme)
     // The Light theme uses these values. We will use them here too as "Strict" adherence implies usage of these hexes.
     let comment = Color { r: 170, g: 55, b: 49, a: 255 };   // #AA3731 (Red)
     let string = Color { r: 68, g: 140, b: 39, a: 255 };    // #448C27 (Green)
     let constant = Color { r: 122, g: 62, b: 157, a: 255 }; // #7A3E9D (Magenta)
-    let definition = Color { r: 50, g: 92, b: 192, a: 255 };// #325CC0 (Blue)
+    let definition = Color { r: 120, g: 160, b: 255, a: 255 };// Lighter blue for better readability on dark/grey backgrounds
     let _regex = Color { r: 122, g: 62, b: 157, a: 255 };    // #7A3E9D (Magenta)
 
     build_alabaster_theme("Alabaster Dark", bg, fg, comment, string, constant, definition, _regex)

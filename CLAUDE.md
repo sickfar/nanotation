@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **nanotation** is a lightweight terminal-based annotation editor written in Rust. The binary is named `nanot` (not `nanotation`). It enables inline code review workflows using the `[ANNOTATION]` marker format with language-aware comment syntax.
 
-**Version:** 0.2.0
+**Version:** 0.2.1
 **Language:** Rust (Edition 2024)
 **Dependencies:** crossterm (terminal I/O), syntect (syntax highlighting), unicode-width
 
@@ -204,4 +204,6 @@ The `PROMPT.md` file contains formal instructions for AI agents to process `[ANN
 | `PgUp` / `PgDn` | Page navigation |
 | `Home` / `End` | Jump to start/end of file |
 
-**Note**: When diff is available (git repo + tracked file), an orange `^D Diff` indicator appears in the status bar.
+**Notes**:
+- **Multi-Layout Support**: All Ctrl-based hotkeys work with English and Russian keyboard layouts (e.g., Ctrl+X works as both Ctrl+X and Ctrl+Ч). This allows seamless annotation editing while typing in different languages.
+- When diff is available (git repo + tracked file), an orange `^D Diff` indicator appears in the status bar.

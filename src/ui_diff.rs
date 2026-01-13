@@ -242,7 +242,7 @@ fn render_diff_pane_line(
             queue!(
                 stdout,
                 SetBackgroundColor(colors.bg),
-                SetForegroundColor(colors.status_fg),
+                SetForegroundColor(colors.line_number_fg),
                 Print(&line_num_str),
             )?;
 
@@ -279,7 +279,10 @@ fn render_diff_pane_line(
                             break;
                         }
                         let fg = to_crossterm_color(style.foreground);
-                        let text_to_print: String = text.chars().take(content_width - current_width).collect();
+                        // Use truncate_to_width for proper wide character handling
+                        use crate::text::truncate_to_width;
+                        let remaining_width = content_width.saturating_sub(current_width);
+                        let text_to_print = truncate_to_width(text, remaining_width);
                         queue!(
                             stdout,
                             SetAttribute(Attribute::Reset),
@@ -384,7 +387,9 @@ fn render_word_diff(
 
     // Render leading whitespace first
     if !leading_ws.is_empty() && current_width < content_width {
-        let ws_to_print: String = leading_ws.chars().take(content_width).collect();
+        // Use truncate_to_width for proper wide character handling
+        use crate::text::truncate_to_width;
+        let ws_to_print = truncate_to_width(leading_ws, content_width);
         queue!(
             stdout,
             SetBackgroundColor(line_bg),
@@ -430,11 +435,10 @@ fn render_word_diff(
         };
 
         // Print word with appropriate background
-        let text_to_print: String = word
-            .text
-            .chars()
-            .take(content_width.saturating_sub(current_width))
-            .collect();
+        // Use truncate_to_width for proper wide character handling
+        use crate::text::truncate_to_width;
+        let remaining_width = content_width.saturating_sub(current_width);
+        let text_to_print = truncate_to_width(&word.text, remaining_width);
 
         queue!(
             stdout,
@@ -732,7 +736,10 @@ fn position_diff_cursor(
         ""
     };
 
-    let cursor_x = 2 + cursor_col.min(display_line.chars().count());
+    // Convert character index to visual column for proper cursor positioning with wide chars
+    use crate::text::char_index_to_visual_col;
+    let cursor_visual_col = char_index_to_visual_col(display_line, cursor_col);
+    let cursor_x = 2 + cursor_visual_col;
 
     queue!(stdout, MoveTo(cursor_x as u16, cursor_screen_line), Show)?;
 

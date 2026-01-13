@@ -379,18 +379,45 @@ pub fn calculate_diff(working: &[Line], head_content: &str, comment_style: &str)
 }
 
 /// Strip annotation from a line content.
+/// Only recognizes [ANNOTATION] when:
+/// 1. For markdown: at the start of the line (after whitespace)
+/// 2. For other languages: after comment prefix + space (inline comment at end of line)
 pub fn strip_annotation(content: &str, comment_style: &str) -> String {
     if comment_style.is_empty() {
-        // For markdown, annotations are standalone [ANNOTATION]
-        if let Some(pos) = content.find("[ANNOTATION]") {
-            return content[..pos].trim_end().to_string();
+        // For markdown, [ANNOTATION] must be at the start of the trimmed line
+        let trimmed = content.trim_start();
+        if trimmed.starts_with("[ANNOTATION]") {
+            let leading_ws_len = content.len() - trimmed.len();
+            return content[..leading_ws_len].to_string();
         }
         return content.to_string();
     }
 
-    // Find comment with annotation marker
+    // For other languages: strip inline annotations
+    // Format: <code> <comment_prefix> [ANNOTATION] <text>
+    // The annotation must follow the comment prefix + space
     let annotation_marker = format!("{} [ANNOTATION]", comment_style);
+
     if let Some(pos) = content.find(&annotation_marker) {
+        // Check what comes before the marker
+        let before_marker = &content[..pos];
+
+        // Only strip if this is truly an inline comment at the end of a code line
+        // Reject if there are table markers or quotes that indicate this is documentation
+        if before_marker.contains('|') || before_marker.contains('*') {
+            // Likely in a markdown table or documentation
+            return content.to_string();
+        }
+
+        // Also check if the comment marker is inside quotes (string literal in docs)
+        // Count quotes before the marker position
+        let quote_count = before_marker.matches('"').count();
+        if quote_count % 2 == 1 {
+            // Odd number of quotes = marker is inside a string
+            return content.to_string();
+        }
+
+        // Strip the annotation
         return content[..pos].trim_end().to_string();
     }
 
@@ -870,8 +897,50 @@ mod strip_annotation_tests {
 
     #[test]
     fn test_strip_annotation_markdown() {
+        // Only strips when at the start
+        let result = strip_annotation("[ANNOTATION] fix this", "");
+        assert_eq!(result, "");
+
+        // Does NOT strip when in the middle
         let result = strip_annotation("some text [ANNOTATION] fix", "");
-        assert_eq!(result, "some text");
+        assert_eq!(result, "some text [ANNOTATION] fix");
+    }
+
+    #[test]
+    fn test_strip_annotation_in_table() {
+        // Should NOT strip annotations that appear in markdown tables
+        let result = strip_annotation("| **Rust** | // [ANNOTATION] ... | // |", "//");
+        assert_eq!(result, "| **Rust** | // [ANNOTATION] ... | // |");
+    }
+
+    #[test]
+    fn test_strip_annotation_in_documentation() {
+        // Should NOT strip annotations in documentation examples
+        let result = strip_annotation("**Markdown** | [ANNOTATION] ... | (None)", "");
+        assert_eq!(result, "**Markdown** | [ANNOTATION] ... | (None)");
+    }
+
+    #[test]
+    fn test_strip_annotation_inline_valid() {
+        // Should strip valid inline annotations (no table markers before)
+        let result = strip_annotation("let x = 5; // [ANNOTATION] fix this", "//");
+        assert_eq!(result, "let x = 5;");
+    }
+
+    #[test]
+    fn test_strip_annotation_readme_table_example() {
+        // Exact case from README.md - should NOT strip
+        let rust_line = "| **Rust, JS, C, Go, Java** | // [ANNOTATION] ... | // |";
+        let result = strip_annotation(rust_line, "//");
+        assert_eq!(result, rust_line); // Should be unchanged
+
+        let python_line = "| **Python, Ruby, Shell, YAML** | # [ANNOTATION] ... | # |";
+        let result = strip_annotation(python_line, "#");
+        assert_eq!(result, python_line); // Should be unchanged
+
+        let sql_line = "| **SQL, Lua, Haskell** | -- [ANNOTATION] ... | -- |";
+        let result = strip_annotation(sql_line, "--");
+        assert_eq!(result, sql_line); // Should be unchanged
     }
 }
 

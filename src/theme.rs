@@ -17,6 +17,7 @@ pub struct ColorScheme {
     pub annotation_window_fg: Color,
     pub status_bg: Color,
     pub status_fg: Color,
+    pub line_number_fg: Color,
     // Diff mode colors
     pub diff_added_bg: Color,
     pub diff_removed_bg: Color,
@@ -36,7 +37,7 @@ impl Theme {
             Theme::Dark => ColorScheme {
                 bg: Color::Black,
                 _fg: Color::White,
-                selected_bg: Color::DarkGrey,
+                selected_bg: Color::Rgb { r: 40, g: 40, b: 40 },
                 annotated_bg: Color::Rgb { r: 40, g: 60, b: 80 },
                 annotated_selected_bg: Color::Rgb {
                     r: 60,
@@ -51,6 +52,11 @@ impl Theme {
                 annotation_window_fg: Color::Yellow,
                 status_bg: Color::DarkGrey,
                 status_fg: Color::White,
+                line_number_fg: Color::Rgb {
+                    r: 120,
+                    g: 120,
+                    b: 120,
+                },
                 // Diff colors - pale green/red backgrounds
                 diff_added_bg: Color::Rgb {
                     r: 30,
@@ -126,6 +132,11 @@ impl Theme {
                     b: 100,
                 },
                 status_fg: Color::White,
+                line_number_fg: Color::Rgb {
+                    r: 80,
+                    g: 80,
+                    b: 80,
+                },
                 // Diff colors - pale green/red backgrounds
                 diff_added_bg: Color::Rgb {
                     r: 220,
@@ -181,6 +192,7 @@ mod tests {
         let colors = theme.colors();
         assert_eq!(colors.bg, Color::Black);
         assert_eq!(colors._fg, Color::White);
+        assert_eq!(colors.selected_bg, Color::Rgb { r: 40, g: 40, b: 40 });
         assert_eq!(colors.status_bg, Color::DarkGrey);
     }
 
