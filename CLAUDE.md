@@ -204,4 +204,6 @@ The `PROMPT.md` file contains formal instructions for AI agents to process `[ANN
 | `PgUp` / `PgDn` | Page navigation |
 | `Home` / `End` | Jump to start/end of file |
 
-**Note**: When diff is available (git repo + tracked file), an orange `^D Diff` indicator appears in the status bar.
+**Notes**:
+- **Multi-Layout Support**: All Ctrl-based hotkeys work with English and Russian keyboard layouts (e.g., Ctrl+X works as both Ctrl+X and Ctrl+Ч). This allows seamless annotation editing while typing in different languages.
+- When diff is available (git repo + tracked file), an orange `^D Diff` indicator appears in the status bar.

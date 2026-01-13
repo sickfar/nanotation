@@ -641,6 +641,60 @@ mod wrapped_cursor_tests {
     }
 
     #[test]
+    fn test_cursor_to_wrapped_with_wide_chars() {
+        // "你好世界" = 4 CJK chars, each 2 visual cols = 8 visual width total
+        // wrap_text splits by whitespace, so "你好世界" (no spaces) stays on one line
+        let buffer = "你好世界";
+
+        // At width 10, all chars fit on one line
+        let pos = cursor_to_wrapped_position(buffer, 2, 10);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.col, 2);
+
+        // Test with spaces: "你好 世界" where "你好 " = 5 visual (4+1)
+        // wrap_text will put "你好 " on line 0 and "世界" on line 1
+        let buffer_with_spaces = "你好 世界";
+        let pos = cursor_to_wrapped_position(buffer_with_spaces, 2, 5);
+        // Position 2 is after "你好", before space
+        assert_eq!(pos.line, 0);
+    }
+
+    #[test]
+    fn test_cursor_to_wrapped_mixed_width() {
+        // "Hi 你好" with space to allow wrapping
+        // "Hi" = 2 visual, " " = 1, "你好" = 4 visual
+        let buffer = "Hi 你好";
+
+        // At width 10, everything fits on one line
+        let pos = cursor_to_wrapped_position(buffer, 3, 10);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.col, 3); // After "Hi "
+
+        // At width 3, "Hi" (2 visual) fits, " 你好" (5 visual) wraps
+        let pos = cursor_to_wrapped_position(buffer, 3, 3);
+        // Position 3 should be on line 1 (after wrap)
+        assert_eq!(pos.line, 1);
+        assert_eq!(pos.col, 0); // At start of wrapped line
+    }
+
+    #[test]
+    fn test_wrapped_position_to_cursor_with_wide_chars() {
+        // "你好 世界" = "你好" + " " + "世界"
+        let buffer = "你好 世界";
+
+        // At width 5, "你好" (4 visual) fits, " 世界" wraps
+        // Line 0, col 2 is at the space
+        let pos = WrappedPosition { line: 0, col: 2 };
+        let cursor = wrapped_position_to_cursor(buffer, pos, 5);
+        assert_eq!(cursor, 2); // Character position of space
+
+        // Line 1, col 0 should be at start of "世界" (position 3 after "你好 ")
+        let pos = WrappedPosition { line: 1, col: 0 };
+        let cursor = wrapped_position_to_cursor(buffer, pos, 5);
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
     fn test_move_cursor_down_at_bottom() {
         let buffer = "hello world";
 
