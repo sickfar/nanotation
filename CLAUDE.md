@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **nanotation** is a lightweight terminal-based annotation editor written in Rust. The binary is named `nanot` (not `nanotation`). It enables inline code review workflows using the `[ANNOTATION]` marker format with language-aware comment syntax.
 
-**Version:** 0.2.0
+**Version:** 0.2.1
 **Language:** Rust (Edition 2024)
 **Dependencies:** crossterm (terminal I/O), syntect (syntax highlighting), unicode-width
 
