@@ -17,6 +17,7 @@ pub struct ColorScheme {
     pub annotation_window_fg: Color,
     pub status_bg: Color,
     pub status_fg: Color,
+    pub line_number_fg: Color,
     // Diff mode colors
     pub diff_added_bg: Color,
     pub diff_removed_bg: Color,
@@ -51,6 +52,11 @@ impl Theme {
                 annotation_window_fg: Color::Yellow,
                 status_bg: Color::DarkGrey,
                 status_fg: Color::White,
+                line_number_fg: Color::Rgb {
+                    r: 120,
+                    g: 120,
+                    b: 120,
+                },
                 // Diff colors - pale green/red backgrounds
                 diff_added_bg: Color::Rgb {
                     r: 30,
@@ -126,6 +132,11 @@ impl Theme {
                     b: 100,
                 },
                 status_fg: Color::White,
+                line_number_fg: Color::Rgb {
+                    r: 80,
+                    g: 80,
+                    b: 80,
+                },
                 // Diff colors - pale green/red backgrounds
                 diff_added_bg: Color::Rgb {
                     r: 220,

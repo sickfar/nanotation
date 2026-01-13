@@ -242,7 +242,7 @@ fn render_diff_pane_line(
             queue!(
                 stdout,
                 SetBackgroundColor(colors.bg),
-                SetForegroundColor(colors.status_fg),
+                SetForegroundColor(colors.line_number_fg),
                 Print(&line_num_str),
             )?;
 
