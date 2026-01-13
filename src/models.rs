@@ -1,15 +1,50 @@
+use crate::diff::DiffResult;
+
 #[derive(Clone)]
 pub struct Line {
     pub content: String,
     pub annotation: Option<String>,
 }
 
-pub enum Mode {
+// ============================================================================
+// New Architecture: ViewMode + EditorState (orthogonal concerns)
+// ============================================================================
+
+/// How the main content area is rendered.
+/// This affects ONLY the visual presentation, not input handling.
+#[derive(Clone)]
+pub enum ViewMode {
+    /// Standard single-pane view
     Normal,
+    /// Split-pane diff view comparing working copy to HEAD
+    Diff { diff_result: DiffResult },
+}
+
+impl Default for ViewMode {
+    fn default() -> Self {
+        ViewMode::Normal
+    }
+}
+
+/// What input mode the user is in.
+/// This affects ONLY input handling, independent of view mode.
+pub enum EditorState {
+    /// Normal navigation, all shortcuts active
+    Idle,
+    /// Editing an annotation for the current line
     Annotating { buffer: String, cursor_pos: usize },
-    Search { query: String, cursor_pos: usize },
+    /// Searching for text in the file
+    Searching { query: String, cursor_pos: usize },
+    /// Showing help overlay
+    ShowingHelp,
+    /// Asking about unsaved changes before quit
     QuitPrompt,
-    Help,
+}
+
+impl Default for EditorState {
+    fn default() -> Self {
+        EditorState::Idle
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -19,4 +54,107 @@ pub enum Action {
         old_text: Option<String>,
         new_text: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::{DiffLine, DiffResult, LineChange};
+
+    // =========================================================================
+    // ViewMode Tests
+    // =========================================================================
+
+    #[test]
+    fn test_view_mode_normal_is_default() {
+        let view_mode = ViewMode::default();
+        assert!(matches!(view_mode, ViewMode::Normal));
+    }
+
+    #[test]
+    fn test_view_mode_diff_holds_diff_result() {
+        let diff_result = DiffResult {
+            lines: vec![DiffLine {
+                working: Some((1, "line1".to_string(), LineChange::Unchanged)),
+                head: Some((1, "line1".to_string(), LineChange::Unchanged)),
+            }],
+        };
+        let view_mode = ViewMode::Diff { diff_result: diff_result.clone() };
+
+        if let ViewMode::Diff { diff_result: stored } = view_mode {
+            assert_eq!(stored.lines.len(), 1);
+        } else {
+            panic!("Expected ViewMode::Diff");
+        }
+    }
+
+    #[test]
+    fn test_view_mode_clone() {
+        let diff_result = DiffResult {
+            lines: vec![DiffLine {
+                working: Some((1, "test".to_string(), LineChange::Added)),
+                head: None,
+            }],
+        };
+        let original = ViewMode::Diff { diff_result };
+        let cloned = original.clone();
+
+        if let (ViewMode::Diff { diff_result: d1 }, ViewMode::Diff { diff_result: d2 }) = (&original, &cloned) {
+            assert_eq!(d1.lines.len(), d2.lines.len());
+        } else {
+            panic!("Clone failed");
+        }
+    }
+
+    // =========================================================================
+    // EditorState Tests
+    // =========================================================================
+
+    #[test]
+    fn test_editor_state_idle_is_default() {
+        let state = EditorState::default();
+        assert!(matches!(state, EditorState::Idle));
+    }
+
+    #[test]
+    fn test_editor_state_annotating_holds_buffer() {
+        let state = EditorState::Annotating {
+            buffer: "test annotation".to_string(),
+            cursor_pos: 5,
+        };
+
+        if let EditorState::Annotating { buffer, cursor_pos } = state {
+            assert_eq!(buffer, "test annotation");
+            assert_eq!(cursor_pos, 5);
+        } else {
+            panic!("Expected EditorState::Annotating");
+        }
+    }
+
+    #[test]
+    fn test_editor_state_searching_holds_query() {
+        let state = EditorState::Searching {
+            query: "search term".to_string(),
+            cursor_pos: 11,
+        };
+
+        if let EditorState::Searching { query, cursor_pos } = state {
+            assert_eq!(query, "search term");
+            assert_eq!(cursor_pos, 11);
+        } else {
+            panic!("Expected EditorState::Searching");
+        }
+    }
+
+    #[test]
+    fn test_editor_state_showing_help() {
+        let state = EditorState::ShowingHelp;
+        assert!(matches!(state, EditorState::ShowingHelp));
+    }
+
+    #[test]
+    fn test_editor_state_quit_prompt() {
+        let state = EditorState::QuitPrompt;
+        assert!(matches!(state, EditorState::QuitPrompt));
+    }
 }

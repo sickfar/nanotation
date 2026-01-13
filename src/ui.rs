@@ -1,24 +1,28 @@
-use crate::models::{Line, Mode};
-use crate::text::{wrap_text, wrap_styled_text};
+use crate::highlighting::{to_crossterm_color, SyntaxHighlighter};
+use crate::models::{EditorState, Line, ViewMode};
+use crate::text::{wrap_styled_text, wrap_text};
 use crate::theme::{ColorScheme, Theme};
-use crate::highlighting::{SyntaxHighlighter, to_crossterm_color};
-use syntect::highlighting::FontStyle;
+use crate::ui_diff::render_diff_mode;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     queue,
-    style::{Print, ResetColor, SetBackgroundColor, SetForegroundColor, SetAttribute, Attribute},
+    style::{Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{self},
 };
 use std::io::{self, Write};
 use std::path::Path;
+use syntect::highlighting::FontStyle;
 use unicode_width::UnicodeWidthStr;
 
 /// Renders the editor UI to the terminal.
+/// Uses separate view_mode (how to render) and editor_state (input mode).
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     lines: &[Line],
     cursor_line: usize,
     scroll_offset: usize,
-    mode: &Mode,
+    view_mode: &ViewMode,
+    editor_state: &EditorState,
     file_path: &Option<String>,
     modified: bool,
     theme: Theme,
@@ -26,7 +30,26 @@ pub fn render(
     current_match: Option<usize>,
     annotation_scroll: usize,
     highlighter: &SyntaxHighlighter,
+    status_message: Option<&str>,
+    lang_comment: &str,
 ) -> io::Result<()> {
+    // Check if we're in diff view mode
+    if let ViewMode::Diff { diff_result } = view_mode {
+        return render_diff_mode(
+            lines,
+            cursor_line,
+            scroll_offset,
+            diff_result,
+            editor_state,
+            file_path,
+            modified,
+            theme,
+            annotation_scroll,
+            highlighter,
+            status_message,
+            lang_comment,
+        );
+    }
     let (width, height) = terminal::size()?;
     // Reserve 5 lines at bottom: 4 for annotation area (border + 2 text lines + border) + 1 for status bar
     let content_height = (height - 5) as usize;
@@ -166,12 +189,12 @@ pub fn render(
 
     // Render annotation area (4 lines: border + 2 text lines + border) above status bar
     let annotation_start = height - 5;
-    
+
     render_annotation_area(
         &mut stdout,
         lines,
         cursor_line,
-        mode,
+        editor_state,
         annotation_scroll,
         &colors,
         width,
@@ -181,7 +204,8 @@ pub fn render(
     // Render status bar
     render_status_bar(
         &mut stdout,
-        mode,
+        view_mode,
+        editor_state,
         file_path,
         modified,
         cursor_line,
@@ -191,26 +215,24 @@ pub fn render(
         &colors,
         width,
         height,
+        status_message,
     )?;
 
-    match mode {
-        Mode::Help => render_help_overlay(&mut stdout, &colors, width, height)?,
-        _ => {},
+    // Show help overlay if in ShowingHelp state
+    if matches!(editor_state, EditorState::ShowingHelp) {
+        render_help_overlay(&mut stdout, &colors, width, height)?;
     }
 
-    // Position and show cursor if in annotation edit mode
-    let is_editing = matches!(mode, Mode::Annotating { .. });
-    if is_editing {
-        if let Mode::Annotating { buffer, cursor_pos } = mode {
-            position_cursor(
-                &mut stdout,
-                buffer,
-                *cursor_pos,
-                annotation_scroll,
-                annotation_start,
-                width,
-            )?;
-        }
+    // Position and show cursor if in annotation edit state
+    if let EditorState::Annotating { buffer, cursor_pos } = editor_state {
+        position_cursor(
+            &mut stdout,
+            buffer,
+            *cursor_pos,
+            annotation_scroll,
+            annotation_start,
+            width,
+        )?;
     } else {
         queue!(stdout, Hide)?;
     }
@@ -223,7 +245,7 @@ fn render_annotation_area(
     stdout: &mut impl Write,
     lines: &[Line],
     cursor_line: usize,
-    mode: &Mode,
+    editor_state: &EditorState,
     annotation_scroll: usize,
     colors: &ColorScheme,
     width: u16,
@@ -239,23 +261,21 @@ fn render_annotation_area(
         ResetColor
     )?;
 
-    // Get annotation content
-    let (annotation_text, _cursor_pos, _is_editing) = match mode {
-        Mode::Annotating { buffer, cursor_pos } => {
-            let text = if buffer.is_empty() {
+    // Get annotation content based on editor state
+    let annotation_text = match editor_state {
+        EditorState::Annotating { buffer, .. } => {
+            if buffer.is_empty() {
                 "[Type annotation here...]".to_string()
             } else {
                 buffer.clone()
-            };
-            (text, *cursor_pos, true)
+            }
         }
         _ => {
-            let text = if let Some(ref annotation) = lines[cursor_line].annotation {
+            if let Some(ref annotation) = lines[cursor_line].annotation {
                 annotation.clone()
             } else {
                 "[No annotation - Press Enter to add]".to_string()
-            };
-            (text, 0, false)
+            }
         }
     };
 
@@ -297,9 +317,11 @@ fn render_annotation_area(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_status_bar(
     stdout: &mut impl Write,
-    mode: &Mode,
+    view_mode: &ViewMode,
+    editor_state: &EditorState,
     file_path: &Option<String>,
     modified: bool,
     cursor_line: usize,
@@ -309,30 +331,42 @@ fn render_status_bar(
     colors: &ColorScheme,
     width: u16,
     height: u16,
+    status_message: Option<&str>,
 ) -> io::Result<()> {
-    let status = match mode {
-        Mode::Normal => {
-            let modified_flag = if modified { " [Modified]" } else { "" };
-            let file = file_path.as_deref().unwrap_or("[No Name]");
-            format!(" {} | Line {}/{}{}  ^G Help  ^X Exit  ^O Save  ^W Search  ^T Theme  ^D Del  ^N/^P Jump  ^Z/^Y Undo/Redo",
-                file, cursor_line + 1, total_lines, modified_flag)
-        }
-        Mode::Annotating { .. } => {
-            " Enter: Save  Esc: Cancel  ←→: Move cursor  ↑↓: Navigate lines".to_string()
-        }
-        Mode::Search { query, .. } => {
-            let matches = if !search_matches.is_empty() {
-                format!(" ({}/{})", current_match.map(|i| i + 1).unwrap_or(0), search_matches.len())
-            } else {
-                String::new()
-            };
-            format!(" Search: {}█{}  Enter: Next  Esc: Cancel", query, matches)
-        }
-        Mode::QuitPrompt => {
-            " Unsaved changes! Save before exiting? (y/n/Esc)".to_string()
-        }
-        Mode::Help => {
-            " Help Mode - Press any key to return".to_string()
+    // If there's a status message, show it instead
+    let status = if let Some(msg) = status_message {
+        format!(" {}", msg)
+    } else {
+        // Status bar content depends on editor_state (NOT view_mode)
+        match editor_state {
+            EditorState::Idle => {
+                let modified_flag = if modified { " [Modified]" } else { "" };
+                let file = file_path.as_deref().unwrap_or("[No Name]");
+                let view_indicator = if matches!(view_mode, ViewMode::Diff { .. }) {
+                    "DIFF | "
+                } else {
+                    ""
+                };
+                format!(" {}{} | Line {}/{}{}  ^G Help  ^X Exit  ^O Save  ^W Search  ^K Diff  ^T Theme  ^D Del  ^N/^P Jump  ^Z/^Y Undo/Redo",
+                    view_indicator, file, cursor_line + 1, total_lines, modified_flag)
+            }
+            EditorState::Annotating { .. } => {
+                " Enter: Save  Esc: Cancel  ←→: Move cursor  ↑↓: Navigate lines".to_string()
+            }
+            EditorState::Searching { query, .. } => {
+                let matches = if !search_matches.is_empty() {
+                    format!(" ({}/{})", current_match.map(|i| i + 1).unwrap_or(0), search_matches.len())
+                } else {
+                    String::new()
+                };
+                format!(" Search: {}█{}  Enter: Next  Esc: Cancel", query, matches)
+            }
+            EditorState::QuitPrompt => {
+                " Unsaved changes! Save before exiting? (y/n/Esc)".to_string()
+            }
+            EditorState::ShowingHelp => {
+                " Help Mode - Press any key to return".to_string()
+            }
         }
     };
 
@@ -467,10 +501,10 @@ fn render_help_overlay(
         " ^O         Save File",
         " ^X         Exit",
         " ^G         Toggle Help",
+        " ^K         Toggle Diff View",
         "",
         " Arrow Keys Navigation",
         " PgUp/PgDn  Page Navigation",
-        " Alt+Up/Dn  Page Navigation",
         "",
         " Press Any Key to Close",
     ];
