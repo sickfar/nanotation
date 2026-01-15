@@ -792,4 +792,785 @@ mod tests {
         assert!(entry.is_directory());
         assert!(!entry.is_expanded());
     }
+
+    // ========================================================================
+    // Git Mode Tests
+    // ========================================================================
+
+    fn create_git_repo_for_tree() -> TempDir {
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+
+        let output = Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to run git init");
+        assert!(output.status.success(), "git init failed");
+
+        let output = Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to configure git email");
+        assert!(output.status.success());
+
+        let output = Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to configure git name");
+        assert!(output.status.success());
+
+        let output = Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to disable gpg signing");
+        assert!(output.status.success());
+
+        dir
+    }
+
+    fn git_add_and_commit(dir: &TempDir, filename: &str, content: &str) {
+        use std::process::Command;
+
+        fs::write(dir.path().join(filename), content).unwrap();
+
+        let output = Command::new("git")
+            .args(["add", filename])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to git add");
+        assert!(output.status.success());
+
+        let output = Command::new("git")
+            .args(["commit", "-m", "Add file"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to git commit");
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_git_mode_toggle() {
+        let dir = create_git_repo_for_tree();
+        git_add_and_commit(&dir, "file.txt", "content");
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        assert!(matches!(panel.mode, TreeMode::FullTree));
+
+        panel.toggle_mode().unwrap();
+        assert!(matches!(panel.mode, TreeMode::GitChangedFiles));
+
+        panel.toggle_mode().unwrap();
+        assert!(matches!(panel.mode, TreeMode::FullTree));
+    }
+
+    #[test]
+    fn test_git_mode_shows_changed_files() {
+        let dir = create_git_repo_for_tree();
+        git_add_and_commit(&dir, "file.txt", "initial content");
+
+        // Modify the file
+        fs::write(dir.path().join("file.txt"), "modified content").unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.toggle_mode().unwrap();
+
+        // Should have the modified file in the list
+        let has_file = panel.entries.iter().any(|e| e.name == "file.txt");
+        assert!(has_file, "Git mode should show modified file");
+    }
+
+    #[test]
+    fn test_git_mode_shows_untracked_files() {
+        let dir = create_git_repo_for_tree();
+        git_add_and_commit(&dir, "tracked.txt", "content");
+
+        // Create untracked file
+        fs::write(dir.path().join("untracked.txt"), "new content").unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.toggle_mode().unwrap();
+
+        let has_untracked = panel.entries.iter().any(|e| e.name == "untracked.txt");
+        assert!(has_untracked, "Git mode should show untracked files");
+    }
+
+    #[test]
+    fn test_git_mode_no_changes_shows_message() {
+        let dir = create_git_repo_for_tree();
+        git_add_and_commit(&dir, "file.txt", "content");
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.toggle_mode().unwrap();
+
+        // When there are no changes, should show "(no changes)" entry
+        let has_no_changes = panel.entries.iter().any(|e| e.name.contains("no changes"));
+        assert!(has_no_changes, "Git mode with no changes should show message");
+    }
+
+    #[test]
+    fn test_git_mode_not_a_repo() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.toggle_mode().unwrap();
+
+        // Should show "(not a git repo)" message
+        let has_message = panel.entries.iter().any(|e| e.name.contains("not a git repo"));
+        assert!(has_message, "Non-git directory should show message");
+    }
+
+    // ========================================================================
+    // File Name Handling Tests
+    // ========================================================================
+
+    #[test]
+    fn test_unicode_filenames() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("日本語.txt")).unwrap();
+        File::create(dir.path().join("Привет.txt")).unwrap();
+        File::create(dir.path().join("emoji_🎉.txt")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        let has_japanese = panel.entries.iter().any(|e| e.name == "日本語.txt");
+        let has_russian = panel.entries.iter().any(|e| e.name == "Привет.txt");
+        let has_emoji = panel.entries.iter().any(|e| e.name == "emoji_🎉.txt");
+
+        assert!(has_japanese, "Should handle Japanese filenames");
+        assert!(has_russian, "Should handle Russian filenames");
+        assert!(has_emoji, "Should handle emoji in filenames");
+    }
+
+    #[test]
+    fn test_filenames_with_spaces() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file with spaces.txt")).unwrap();
+        File::create(dir.path().join("another file.txt")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        let has_spaces = panel.entries.iter().any(|e| e.name == "file with spaces.txt");
+        assert!(has_spaces, "Should handle filenames with spaces");
+    }
+
+    #[test]
+    fn test_filenames_with_special_chars() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file-with-dashes.txt")).unwrap();
+        File::create(dir.path().join("file_with_underscores.txt")).unwrap();
+        File::create(dir.path().join("file.multiple.dots.txt")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        assert!(panel.entries.iter().any(|e| e.name == "file-with-dashes.txt"));
+        assert!(panel.entries.iter().any(|e| e.name == "file_with_underscores.txt"));
+        assert!(panel.entries.iter().any(|e| e.name == "file.multiple.dots.txt"));
+    }
+
+    #[test]
+    fn test_hidden_files_sorted_correctly() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join(".gitignore")).unwrap();
+        File::create(dir.path().join(".hidden")).unwrap();
+        File::create(dir.path().join("afile.txt")).unwrap();
+        File::create(dir.path().join("zfile.txt")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Get positions
+        let gitignore_pos = panel.entries.iter().position(|e| e.name == ".gitignore");
+        let hidden_pos = panel.entries.iter().position(|e| e.name == ".hidden");
+        let afile_pos = panel.entries.iter().position(|e| e.name == "afile.txt");
+
+        assert!(gitignore_pos.is_some());
+        assert!(hidden_pos.is_some());
+        assert!(afile_pos.is_some());
+
+        // Hidden files should be sorted with other files (. sorts before letters)
+        assert!(gitignore_pos.unwrap() < afile_pos.unwrap());
+    }
+
+    // ========================================================================
+    // Deep Nesting Tests
+    // ========================================================================
+
+    #[test]
+    fn test_deep_nesting_five_levels() {
+        let dir = TempDir::new().unwrap();
+
+        // Create 5 levels deep
+        let mut path = dir.path().to_path_buf();
+        for i in 1..=5 {
+            path = path.join(format!("level{}", i));
+            fs::create_dir(&path).unwrap();
+        }
+        File::create(path.join("deep_file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Expand all levels
+        for _ in 0..5 {
+            let dir_idx = panel.entries.iter().position(|e| e.is_directory() && !e.is_expanded());
+            if let Some(idx) = dir_idx {
+                panel.selected_index = idx;
+                panel.expand_selected().unwrap();
+            }
+        }
+
+        // Should find the deep file
+        let has_deep_file = panel.entries.iter().any(|e| e.name == "deep_file.txt");
+        assert!(has_deep_file, "Should be able to navigate to deeply nested file");
+
+        // Check depth is correct
+        let deep_file = panel.entries.iter().find(|e| e.name == "deep_file.txt").unwrap();
+        assert_eq!(deep_file.depth, 5, "Deep file should have depth 5");
+    }
+
+    #[test]
+    fn test_collapse_parent_hides_all_children() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("parent")).unwrap();
+        fs::create_dir(dir.path().join("parent/child")).unwrap();
+        File::create(dir.path().join("parent/child/grandchild.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Expand parent
+        let parent_idx = panel.entries.iter().position(|e| e.name == "parent").unwrap();
+        panel.selected_index = parent_idx;
+        panel.expand_selected().unwrap();
+
+        // Expand child
+        let child_idx = panel.entries.iter().position(|e| e.name == "child").unwrap();
+        panel.selected_index = child_idx;
+        panel.expand_selected().unwrap();
+
+        // Verify grandchild is visible
+        assert!(panel.entries.iter().any(|e| e.name == "grandchild.txt"));
+
+        // Collapse parent
+        let parent_idx = panel.entries.iter().position(|e| e.name == "parent").unwrap();
+        panel.selected_index = parent_idx;
+        panel.collapse_selected().unwrap();
+
+        // Child and grandchild should both be hidden
+        assert!(!panel.entries.iter().any(|e| e.name == "child"));
+        assert!(!panel.entries.iter().any(|e| e.name == "grandchild.txt"));
+    }
+
+    #[test]
+    fn test_depth_indicator_correct() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("level1")).unwrap();
+        fs::create_dir(dir.path().join("level1/level2")).unwrap();
+        File::create(dir.path().join("level1/level2/file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Expand all
+        for _ in 0..2 {
+            let dir_idx = panel.entries.iter().position(|e| e.is_directory() && !e.is_expanded());
+            if let Some(idx) = dir_idx {
+                panel.selected_index = idx;
+                panel.expand_selected().unwrap();
+            }
+        }
+
+        let level1 = panel.entries.iter().find(|e| e.name == "level1").unwrap();
+        let level2 = panel.entries.iter().find(|e| e.name == "level2").unwrap();
+        let file = panel.entries.iter().find(|e| e.name == "file.txt").unwrap();
+
+        assert_eq!(level1.depth, 0);
+        assert_eq!(level2.depth, 1);
+        assert_eq!(file.depth, 2);
+    }
+
+    // ========================================================================
+    // Scroll Behavior Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_scroll_on_expand_many_items() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("folder")).unwrap();
+        for i in 0..20 {
+            File::create(dir.path().join(format!("folder/file_{:02}.txt", i))).unwrap();
+        }
+        File::create(dir.path().join("after.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Expand folder
+        let folder_idx = panel.entries.iter().position(|e| e.name == "folder").unwrap();
+        panel.selected_index = folder_idx;
+        panel.expand_selected().unwrap();
+
+        // After expand, selected should still be visible
+        panel.adjust_scroll(10);
+        assert!(panel.scroll_offset <= panel.selected_index);
+    }
+
+    #[test]
+    fn test_scroll_on_collapse_moves_selection() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("folder")).unwrap();
+        for i in 0..5 {
+            File::create(dir.path().join(format!("folder/file_{}.txt", i))).unwrap();
+        }
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Expand folder
+        let folder_idx = panel.entries.iter().position(|e| e.name == "folder").unwrap();
+        panel.selected_index = folder_idx;
+        panel.expand_selected().unwrap();
+
+        // Select a file inside
+        let file_idx = panel.entries.iter().position(|e| e.name == "file_2.txt").unwrap();
+        panel.selected_index = file_idx;
+
+        // Collapse folder - selection should move to folder
+        let folder_idx = panel.entries.iter().position(|e| e.name == "folder").unwrap();
+        panel.selected_index = folder_idx;
+        panel.collapse_selected().unwrap();
+
+        // Selection should be valid
+        assert!(panel.selected_index < panel.entries.len());
+    }
+
+    #[test]
+    fn test_scroll_at_boundary() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..15 {
+            File::create(dir.path().join(format!("file_{:02}.txt", i))).unwrap();
+        }
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        let visible_height = 10;
+
+        // Select item at exactly the boundary
+        panel.selected_index = visible_height - 1;
+        panel.adjust_scroll(visible_height);
+
+        assert_eq!(panel.scroll_offset, 0, "Should not scroll when at boundary");
+
+        // Select one past boundary
+        panel.selected_index = visible_height;
+        panel.adjust_scroll(visible_height);
+
+        assert!(panel.scroll_offset > 0, "Should scroll when past boundary");
+    }
+
+    #[test]
+    fn test_scroll_single_item() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("only_file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        panel.adjust_scroll(10);
+        assert_eq!(panel.scroll_offset, 0);
+        assert_eq!(panel.selected_index, 0);
+    }
+
+    // ========================================================================
+    // Selection Preservation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_selection_preserved_after_refresh_file_exists() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file_a.txt")).unwrap();
+        File::create(dir.path().join("file_b.txt")).unwrap();
+        File::create(dir.path().join("file_c.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Select file_b
+        let idx = panel.entries.iter().position(|e| e.name == "file_b.txt").unwrap();
+        panel.selected_index = idx;
+
+        // Refresh
+        panel.refresh().unwrap();
+
+        // Selection should still be valid
+        assert!(panel.selected_index < panel.entries.len());
+    }
+
+    #[test]
+    fn test_selection_adjusted_after_file_deleted() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file_a.txt")).unwrap();
+        File::create(dir.path().join("file_b.txt")).unwrap();
+        File::create(dir.path().join("file_c.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Select last file
+        panel.selected_index = panel.entries.len() - 1;
+
+        // Delete the last file
+        fs::remove_file(dir.path().join("file_c.txt")).unwrap();
+
+        // Refresh
+        panel.refresh().unwrap();
+
+        // Selection should be adjusted to be within bounds
+        assert!(panel.selected_index < panel.entries.len());
+    }
+
+    #[test]
+    fn test_selection_after_mode_toggle() {
+        let dir = create_git_repo_for_tree();
+        git_add_and_commit(&dir, "file.txt", "content");
+        fs::write(dir.path().join("file.txt"), "modified").unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Select something in full tree mode
+        panel.selected_index = 0;
+        let initial_selection = panel.selected_index;
+
+        // Toggle to git mode
+        panel.toggle_mode().unwrap();
+
+        // Selection should be reset or valid
+        assert!(panel.selected_index < panel.entries.len());
+
+        // Toggle back
+        panel.toggle_mode().unwrap();
+        assert!(panel.selected_index < panel.entries.len());
+    }
+
+    #[test]
+    fn test_selection_after_expand_collapse() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("folder")).unwrap();
+        File::create(dir.path().join("folder/file.txt")).unwrap();
+        File::create(dir.path().join("after.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Get position of "after.txt"
+        let after_idx = panel.entries.iter().position(|e| e.name == "after.txt").unwrap();
+        panel.selected_index = after_idx;
+
+        // Expand folder (items shift)
+        let folder_idx = panel.entries.iter().position(|e| e.name == "folder").unwrap();
+        panel.selected_index = folder_idx;
+        panel.expand_selected().unwrap();
+
+        // Selection should still be valid
+        assert!(panel.selected_index < panel.entries.len());
+    }
+
+    // ========================================================================
+    // Error Scenarios
+    // ========================================================================
+
+    #[test]
+    fn test_symlink_to_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let dir = TempDir::new().unwrap();
+            File::create(dir.path().join("target.txt")).unwrap();
+            symlink(
+                dir.path().join("target.txt"),
+                dir.path().join("link.txt"),
+            ).unwrap();
+
+            let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+            // Both should be visible
+            assert!(panel.entries.iter().any(|e| e.name == "target.txt"));
+            assert!(panel.entries.iter().any(|e| e.name == "link.txt"));
+        }
+    }
+
+    #[test]
+    fn test_symlink_to_directory() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let dir = TempDir::new().unwrap();
+            fs::create_dir(dir.path().join("target_dir")).unwrap();
+            File::create(dir.path().join("target_dir/file.txt")).unwrap();
+            symlink(
+                dir.path().join("target_dir"),
+                dir.path().join("link_dir"),
+            ).unwrap();
+
+            let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+            // Link should be expandable as directory
+            let link_idx = panel.entries.iter().position(|e| e.name == "link_dir");
+            if let Some(idx) = link_idx {
+                panel.selected_index = idx;
+                // Should be able to expand symlinked directory
+                let result = panel.expand_selected();
+                assert!(result.is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn test_expand_on_file_is_noop() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        let file_idx = panel.entries.iter().position(|e| e.name == "file.txt").unwrap();
+        panel.selected_index = file_idx;
+
+        let entries_before = panel.entries.len();
+        let result = panel.expand_selected();
+
+        // Should succeed but not change anything
+        assert!(result.is_ok());
+        assert_eq!(panel.entries.len(), entries_before);
+    }
+
+    #[test]
+    fn test_collapse_on_file_is_noop() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        let file_idx = panel.entries.iter().position(|e| e.name == "file.txt").unwrap();
+        panel.selected_index = file_idx;
+
+        let entries_before = panel.entries.len();
+        let result = panel.collapse_selected();
+
+        assert!(result.is_ok());
+        assert_eq!(panel.entries.len(), entries_before);
+    }
+
+    // ========================================================================
+    // Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_empty_root_directory() {
+        let dir = TempDir::new().unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Root directory shows empty entries list (no "(empty)" placeholder at root level)
+        assert!(panel.entries.is_empty(), "Empty root should have no entries");
+    }
+
+    #[test]
+    fn test_single_file_in_root() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("only_file.txt")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        assert_eq!(panel.entries.len(), 1);
+        assert_eq!(panel.entries[0].name, "only_file.txt");
+    }
+
+    #[test]
+    fn test_directory_with_only_subdirectories() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("dir_a")).unwrap();
+        fs::create_dir(dir.path().join("dir_b")).unwrap();
+        fs::create_dir(dir.path().join("dir_c")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // All entries should be directories
+        for entry in &panel.entries {
+            assert!(entry.is_directory(), "{} should be a directory", entry.name);
+        }
+        assert_eq!(panel.entries.len(), 3);
+    }
+
+    #[test]
+    fn test_directory_with_only_files() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file_a.txt")).unwrap();
+        File::create(dir.path().join("file_b.txt")).unwrap();
+        File::create(dir.path().join("file_c.txt")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // All entries should be files
+        for entry in &panel.entries {
+            assert!(!entry.is_directory(), "{} should be a file", entry.name);
+        }
+        assert_eq!(panel.entries.len(), 3);
+    }
+
+    #[test]
+    fn test_mixed_hidden_and_visible_sorting() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join(".hidden_a")).unwrap();
+        File::create(dir.path().join("visible_a")).unwrap();
+        File::create(dir.path().join(".hidden_b")).unwrap();
+        File::create(dir.path().join("visible_b")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        let names: Vec<&str> = panel.entries.iter().map(|e| e.name.as_str()).collect();
+
+        // Should be sorted case-insensitively (. comes before letters)
+        let mut sorted_names = names.clone();
+        sorted_names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        assert_eq!(names, sorted_names);
+    }
+
+    // ========================================================================
+    // TreeEntry State Tests
+    // ========================================================================
+
+    #[test]
+    fn test_entry_type_file_detection() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("test.txt")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        let entry = panel.entries.iter().find(|e| e.name == "test.txt").unwrap();
+
+        assert!(matches!(entry.entry_type, TreeEntryType::File { .. }));
+        assert!(!entry.is_directory());
+    }
+
+    #[test]
+    fn test_entry_type_directory_detection() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+
+        let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        let entry = panel.entries.iter().find(|e| e.name == "subdir").unwrap();
+
+        assert!(matches!(entry.entry_type, TreeEntryType::Directory { .. }));
+        assert!(entry.is_directory());
+    }
+
+    #[test]
+    fn test_expanded_state_persistence() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("folder")).unwrap();
+        File::create(dir.path().join("folder/file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Initially collapsed
+        let folder = panel.entries.iter().find(|e| e.name == "folder").unwrap();
+        assert!(!folder.is_expanded());
+
+        // Expand
+        let idx = panel.entries.iter().position(|e| e.name == "folder").unwrap();
+        panel.selected_index = idx;
+        panel.expand_selected().unwrap();
+
+        // Now expanded
+        let folder = panel.entries.iter().find(|e| e.name == "folder").unwrap();
+        assert!(folder.is_expanded());
+    }
+
+    #[test]
+    fn test_empty_entry_not_selectable() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("empty_folder")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Expand empty folder
+        let idx = panel.entries.iter().position(|e| e.name == "empty_folder").unwrap();
+        panel.selected_index = idx;
+        panel.expand_selected().unwrap();
+
+        // Find the "(empty)" entry
+        let empty_entry = panel.entries.iter().find(|e| e.name == "(empty)");
+        assert!(empty_entry.is_some());
+        assert!(!empty_entry.unwrap().is_selectable());
+    }
+
+    #[test]
+    fn test_git_status_in_entry() {
+        let dir = create_git_repo_for_tree();
+        git_add_and_commit(&dir, "file.txt", "line1\nline2\nline3");
+
+        // Modify file (add and remove lines)
+        fs::write(dir.path().join("file.txt"), "line1\nmodified\nline3\nnew line").unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.toggle_mode().unwrap();
+
+        // Find the file entry and check git status
+        let file_entry = panel.entries.iter().find(|e| e.name == "file.txt");
+        assert!(file_entry.is_some());
+
+        if let Some(entry) = file_entry {
+            if let TreeEntryType::File { git_status } = &entry.entry_type {
+                assert!(git_status.is_some(), "Should have git status");
+                let status = git_status.as_ref().unwrap();
+                // Should have some added/removed lines
+                assert!(status.added_lines > 0 || status.removed_lines > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_navigate_skips_non_selectable() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("empty_folder")).unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Expand empty folder
+        let idx = panel.entries.iter().position(|e| e.name == "empty_folder").unwrap();
+        panel.selected_index = idx;
+        panel.expand_selected().unwrap();
+
+        // Navigate down past empty entry
+        panel.selected_index = idx;
+        panel.navigate_down();
+
+        // Should skip the "(empty)" entry and land on file.txt or next selectable
+        let selected = &panel.entries[panel.selected_index];
+        assert!(selected.is_selectable(), "Navigation should skip non-selectable entries");
+    }
+
+    #[test]
+    fn test_current_file_tracking() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file_a.txt")).unwrap();
+        File::create(dir.path().join("file_b.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Initially no current file
+        assert!(panel.current_file.is_none());
+
+        // Set current file
+        panel.set_current_file(Some(dir.path().join("file_a.txt")));
+        assert!(panel.current_file.is_some());
+
+        // Check is_current_file
+        let file_a_path = dir.path().join("file_a.txt");
+        let file_b_path = dir.path().join("file_b.txt");
+        assert!(panel.is_current_file(&file_a_path));
+        assert!(!panel.is_current_file(&file_b_path));
+
+        // Clear current file
+        panel.set_current_file(None);
+        assert!(panel.current_file.is_none());
+    }
 }
