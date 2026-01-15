@@ -151,8 +151,8 @@ impl FileTreePanel {
             }
         });
 
-        if entries.is_empty() && depth > 0 {
-            // Show (empty) placeholder for empty directories
+        if entries.is_empty() {
+            // Show (empty) placeholder for empty directories (including root)
             self.entries.push(TreeEntry {
                 path: dir.to_path_buf(),
                 name: "(empty)".to_string(),
@@ -1236,7 +1236,6 @@ mod tests {
 
         // Select something in full tree mode
         panel.selected_index = 0;
-        let initial_selection = panel.selected_index;
 
         // Toggle to git mode
         panel.toggle_mode().unwrap();
@@ -1368,8 +1367,10 @@ mod tests {
 
         let panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
 
-        // Root directory shows empty entries list (no "(empty)" placeholder at root level)
-        assert!(panel.entries.is_empty(), "Empty root should have no entries");
+        // Root directory shows "(empty)" placeholder
+        assert_eq!(panel.entries.len(), 1, "Empty root should have (empty) placeholder");
+        assert_eq!(panel.entries[0].name, "(empty)");
+        assert!(!panel.entries[0].is_selectable(), "(empty) placeholder should not be selectable");
     }
 
     #[test]
