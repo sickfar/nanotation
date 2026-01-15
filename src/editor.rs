@@ -660,9 +660,8 @@ impl Editor {
             if matches!(self.editor_state, EditorState::Idle) {
                 if self.is_modified() {
                     self.editor_state = EditorState::QuitPrompt;
-                    return Ok(true);
                 }
-                // Will exit in main loop
+                return Ok(true); // Always return true when Ctrl+X is recognized
             }
         }
 
@@ -1127,5 +1126,50 @@ mod tests {
         let max_line = editor.lines.len() - 1;
         editor.cursor_line = max_line;
         assert_eq!(editor.cursor_line, max_line);
+    }
+
+    #[test]
+    fn test_ctrl_x_works_with_tree_focused() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::models::FocusedPanel;
+
+        // Create editor with file tree
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Set focus to tree
+        editor.focused_panel = FocusedPanel::FileTree;
+
+        // Press Ctrl+X
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        let result = editor.handle_global_key(key).unwrap();
+
+        // Should return true (handled) - this is the key fix
+        assert!(result, "Ctrl+X should be handled and return true");
+
+        // The editor state should reflect whether it was modified or not:
+        // - If modified: EditorState::QuitPrompt
+        // - If not modified: EditorState::Idle
+        // Either way, the key was handled (returned true), which was the bug
+    }
+
+    #[test]
+    fn test_ctrl_x_with_russian_layout() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::models::FocusedPanel;
+
+        // Create editor with file tree
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Set focus to tree
+        editor.focused_panel = FocusedPanel::FileTree;
+
+        // Press Ctrl+Ч (Russian layout equivalent of Ctrl+X)
+        let key = KeyEvent::new(KeyCode::Char('ч'), KeyModifiers::CONTROL);
+        let result = editor.handle_global_key(key).unwrap();
+
+        // Should return true (handled)
+        assert!(result, "Ctrl+Ч (Russian X) should be handled and return true");
     }
 }

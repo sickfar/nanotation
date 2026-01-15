@@ -115,8 +115,8 @@ pub fn render(
                 status_message,
                 file_tree.is_some(),
                 focused_panel,
-                editor_start_col,
-                editor_width,
+                0,        // Status bar always starts at column 0
+                width,    // Status bar always spans full terminal width
                 height,
             )?;
             stdout.flush()?;
@@ -149,8 +149,8 @@ pub fn render(
                 status_message,
                 file_tree.is_some(),
                 focused_panel,
-                editor_start_col,
-                editor_width,
+                0,        // Status bar always starts at column 0
+                width,    // Status bar always spans full terminal width
                 height,
             )?;
             stdout.flush()?;
@@ -307,7 +307,7 @@ pub fn render(
         annotation_start,
     )?;
 
-    // Render status bar
+    // Render status bar (always full width from column 0)
     render_status_bar_new(
         &mut stdout,
         view_mode,
@@ -319,8 +319,8 @@ pub fn render(
         search_matches,
         current_match,
         &colors,
-        editor_start_col,
-        editor_width,
+        0,        // Status bar always starts at column 0
+        width,    // Status bar always spans full terminal width
         height,
         status_message,
         diff_available,
@@ -396,7 +396,9 @@ fn render_annotation_area(
     };
 
     // Wrap annotation text
-    let max_annotation_width = width as usize - 4;
+    // Width calculation: ║ (1) + space (1) + content + ║ (1) = width
+    // So content area = width - 3
+    let max_annotation_width = width as usize - 3;
     let wrapped_annotation = wrap_text(&annotation_text, max_annotation_width);
 
     // Display 2 lines of wrapped annotation with scroll support
@@ -507,7 +509,7 @@ fn render_status_bar_new(
             )?;
 
             // If diff is available, show the orange indicator with a space before it
-            if diff_available && !has_tree {
+            if diff_available {
                 let diff_indicator = " ^D Diff ";
                 queue!(
                     stdout,
@@ -529,7 +531,7 @@ fn render_status_bar_new(
                 " F1 Help  ^X Exit  ^O Save  ^W Search  ^T Theme"
             };
 
-            let current_len = left_part.len() + if diff_available && !has_tree { 10 } else { 0 };
+            let current_len = left_part.len() + if diff_available { 10 } else { 0 };
             let remaining_width = (width as usize).saturating_sub(current_len + 1);
             use crate::text::truncate_to_width;
             let shortcuts_truncated = truncate_to_width(shortcuts, remaining_width);
