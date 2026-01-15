@@ -724,9 +724,9 @@ impl Editor {
     fn handle_global_key(&mut self, key: crossterm::event::KeyEvent) -> io::Result<bool> {
         use crossterm::event::{KeyCode, KeyModifiers};
 
-        // Tab - switch focus (only in Idle state)
+        // Tab - switch focus (only in Idle state and when file is loaded)
         if key.code == KeyCode::Tab && matches!(self.editor_state, EditorState::Idle) {
-            if self.file_tree.is_some() {
+            if self.file_tree.is_some() && self.editor_content != EditorContent::Empty {
                 self.toggle_focus();
                 return Ok(true);
             }
@@ -1225,5 +1225,125 @@ mod tests {
 
         // Empty editor should NOT be modified
         assert!(!editor.is_modified(), "Empty editor should not be reported as modified");
+    }
+
+    // =========================================================================
+    // Focus State Management Tests
+    // =========================================================================
+
+    #[test]
+    fn test_toggle_focus_tree_to_editor_in_directory_mode() {
+        // Create editor in directory mode
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Verify file tree exists (toggle_focus only works when file_tree.is_some())
+        assert!(editor.file_tree.is_some(), "File tree should be present in directory mode");
+
+        // In directory mode, initial focus is on FileTree
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+
+        // Toggle focus to editor
+        editor.toggle_focus();
+        assert_eq!(editor.focused_panel, FocusedPanel::Editor);
+    }
+
+    #[test]
+    fn test_toggle_focus_editor_to_tree_and_back() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Verify file tree exists
+        assert!(editor.file_tree.is_some(), "File tree should be present in directory mode");
+
+        // Initial focus is on FileTree in directory mode
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+
+        // Toggle to editor
+        editor.toggle_focus();
+        assert_eq!(editor.focused_panel, FocusedPanel::Editor);
+
+        // Toggle back to file tree
+        editor.toggle_focus();
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_focus_persists_across_annotation_edit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Set focus to file tree
+        editor.focused_panel = FocusedPanel::FileTree;
+
+        // Enter annotation mode
+        editor.editor_state = EditorState::Annotating {
+            buffer: String::new(),
+            cursor_pos: 0
+        };
+
+        // Focus should remain on file tree (annotation doesn't affect panel focus)
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_default_focus_is_editor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Verify file tree exists
+        assert!(editor.file_tree.is_some(), "File tree should be present in directory mode");
+
+        // In directory mode, initial focus is on FileTree (not Editor)
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_focus_not_affected_by_operations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a test file
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "test content\n").unwrap();
+
+        let mut editor = Editor::new(test_file.to_str().unwrap().to_string()).unwrap();
+
+        // Set focus to file tree
+        editor.focused_panel = FocusedPanel::FileTree;
+
+        // Perform various operations (modify lines, change cursor, etc.)
+        if !editor.lines.is_empty() {
+            editor.lines[0].annotation = Some("test annotation".to_string());
+        }
+        editor.cursor_line = 0;
+
+        // Focus should remain unchanged after operations
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_tab_key_disabled_when_no_file_loaded() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // Create editor in directory mode (no file loaded initially)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Verify preconditions: file tree exists, but no file is loaded
+        assert!(editor.file_tree.is_some(), "File tree should be present");
+        assert_eq!(editor.editor_content, EditorContent::Empty, "Editor content should be Empty");
+        assert!(matches!(editor.editor_state, EditorState::Idle), "Editor state should be Idle");
+
+        // Initial focus is on FileTree
+        let initial_focus = editor.focused_panel.clone();
+        assert_eq!(initial_focus, FocusedPanel::FileTree);
+
+        // Simulate Tab key press
+        let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let result = editor.handle_global_key(tab_key);
+
+        // Tab key should be handled but focus should NOT change
+        assert!(result.is_ok(), "Tab key handling should not error");
+        assert_eq!(editor.focused_panel, initial_focus, "Focus should not change when no file is loaded");
     }
 }

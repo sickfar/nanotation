@@ -193,4 +193,26 @@ mod tests {
         assert_eq!(FocusedPanel::FileTree, FocusedPanel::FileTree);
         assert_ne!(FocusedPanel::Editor, FocusedPanel::FileTree);
     }
+
+    #[test]
+    fn test_focused_panel_copy_trait() {
+        // Verify FocusedPanel implements Copy
+        let panel = FocusedPanel::Editor;
+        let copied = panel; // Should copy, not move
+        // Both should still be usable
+        assert_eq!(panel, FocusedPanel::Editor);
+        assert_eq!(copied, FocusedPanel::Editor);
+    }
+
+    #[test]
+    fn test_focused_panel_debug_format() {
+        // Verify Debug trait formatting
+        let editor_panel = FocusedPanel::Editor;
+        let tree_panel = FocusedPanel::FileTree;
+        let editor_debug = format!("{:?}", editor_panel);
+        let tree_debug = format!("{:?}", tree_panel);
+
+        assert!(editor_debug.contains("Editor"));
+        assert!(tree_debug.contains("FileTree"));
+    }
 }

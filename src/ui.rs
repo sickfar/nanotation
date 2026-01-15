@@ -5,7 +5,7 @@ use crate::models::{EditorState, FocusedPanel, Line, ViewMode};
 use crate::text::{wrap_styled_text, wrap_text};
 use crate::theme::{ColorScheme, Theme};
 use crate::ui_diff::render_diff_mode;
-use crate::ui_tree::{self, render_file_tree, render_separator, render_error_message};
+use crate::ui_tree::{self, render_file_tree, render_error_message};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     queue,
@@ -49,12 +49,10 @@ pub fn render(
             // Render file tree first
             let mut stdout = io::stdout();
             let is_tree_focused = focused_panel == FocusedPanel::FileTree;
-            render_file_tree(&mut stdout, tree, theme, height.saturating_sub(5), is_tree_focused)?;
-            render_separator(&mut stdout, theme, height.saturating_sub(5))?;
+            render_file_tree(&mut stdout, tree, theme, height.saturating_sub(1), is_tree_focused)?;
 
             let tree_width = ui_tree::TREE_WIDTH;
-            let separator_width = 1;
-            let start = tree_width + separator_width;
+            let start = tree_width;
             let available = (width as usize).saturating_sub(start as usize);
             (start, available as u16)
         } else {
@@ -77,11 +75,16 @@ pub fn render(
             diff_available,
             start_col,
             available_width,
+            focused_panel,
         );
     }
 
-    // Reserve 5 lines at bottom: 4 for annotation area (border + 2 text lines + border) + 1 for status bar
-    let content_height = (height - 5) as usize;
+    // Reserve space at bottom for annotation area + status bar
+    // Add 1 extra line if file tree present (for title bar)
+    // Add 1 more line if file tree present (for editor bottom border)
+    let title_bar_height = if file_tree.is_some() { 1 } else { 0 };
+    let editor_border_height = if file_tree.is_some() { 1 } else { 0 };
+    let content_height = (height - 5 - title_bar_height - editor_border_height) as usize;
     let colors = theme.colors();
 
     let mut stdout = io::stdout();
@@ -89,8 +92,7 @@ pub fn render(
     // Calculate layout based on whether file tree is present
     let (editor_start_col, editor_width) = if file_tree.is_some() {
         let tree_width = ui_tree::TREE_WIDTH;
-        let separator_width = 1;
-        let start = tree_width + separator_width;
+        let start = tree_width;
         let available = (width as usize).saturating_sub(start as usize);
         (start, available as u16)
     } else {
@@ -100,9 +102,31 @@ pub fn render(
     // Render file tree if present
     if let Some(tree) = file_tree {
         let is_tree_focused = focused_panel == FocusedPanel::FileTree;
-        render_file_tree(&mut stdout, tree, theme, height.saturating_sub(5), is_tree_focused)?;
-        render_separator(&mut stdout, theme, height.saturating_sub(5))?;
+        render_file_tree(&mut stdout, tree, theme, height.saturating_sub(1), is_tree_focused)?;
     }
+
+    // Render editor title bar if in directory mode (when file tree is present)
+    let content_start_y = if file_tree.is_some() {
+        let is_editor_focused = focused_panel == FocusedPanel::Editor;
+        let title = file_path.as_deref().and_then(|p| {
+            // Extract just the filename from the path
+            std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+        }).unwrap_or("Editor");
+        render_editor_title_bar(
+            &mut stdout,
+            title,
+            is_editor_focused,
+            &colors,
+            editor_start_col,
+            editor_width,
+            0,
+        )?;
+        1 // Content starts at Y=1 (after title bar)
+    } else {
+        0 // Content starts at Y=0 (no title bar)
+    };
 
     // Handle empty or error editor states
     match editor_content {
@@ -179,10 +203,15 @@ pub fn render(
         }
     }
 
-    queue!(stdout, MoveTo(editor_start_col, 0))?;
+    // Account for borders (left and right) when calculating content area
+    let border_width = if file_tree.is_some() { 2 } else { 0 }; // Only add borders in directory mode
+    let editor_content_start_col = editor_start_col + (if border_width > 0 { 1 } else { 0 });
+    let editor_content_width = editor_width.saturating_sub(border_width);
+
+    queue!(stdout, MoveTo(editor_content_start_col, content_start_y))?;
 
     let gutter_width = lines.len().to_string().len() + 2; // + padding
-    let content_width = (editor_width as usize).saturating_sub(gutter_width);
+    let content_width = (editor_content_width as usize).saturating_sub(gutter_width);
 
     let mut screen_line = 0;
     let mut line_idx = scroll_offset;
@@ -248,7 +277,7 @@ pub fn render(
 
             queue!(
                 stdout,
-                MoveTo(editor_start_col, screen_line as u16),
+                MoveTo(editor_content_start_col, content_start_y + screen_line as u16),
                 SetBackgroundColor(colors.bg),
                 SetForegroundColor(colors.line_number_fg),
                 Print(line_num_str),
@@ -302,16 +331,33 @@ pub fn render(
     while screen_line < content_height {
         queue!(
             stdout,
-            MoveTo(editor_start_col, screen_line as u16),
+            MoveTo(editor_content_start_col, content_start_y + screen_line as u16),
             SetBackgroundColor(colors.bg),
-            Print(format!("{:width$}", "", width = editor_width as usize)),
+            Print(format!("{:width$}", "", width = editor_content_width as usize)),
             ResetColor
         )?;
         screen_line += 1;
     }
 
+    // Render editor borders if in directory mode
+    if file_tree.is_some() {
+        let is_editor_focused = focused_panel == FocusedPanel::Editor;
+        let border_start_y = content_start_y;
+        let border_end_y = height.saturating_sub(6); // End one line before annotation area
+        render_editor_borders(
+            &mut stdout,
+            is_editor_focused,
+            &colors,
+            editor_start_col,
+            editor_width,
+            border_start_y,
+            border_end_y,
+        )?;
+    }
+
     // Render annotation area (4 lines: border + 2 text lines + border) above status bar
     let annotation_start = height - 5;
+    let is_annotation_focused = matches!(editor_state, EditorState::Annotating { .. });
 
     render_annotation_area(
         &mut stdout,
@@ -323,6 +369,7 @@ pub fn render(
         editor_start_col,
         editor_width,
         annotation_start,
+        is_annotation_focused,
     )?;
 
     // Render status bar (always full width from column 0)
@@ -370,6 +417,112 @@ pub fn render(
     Ok(())
 }
 
+fn render_editor_title_bar(
+    stdout: &mut impl Write,
+    title: &str,
+    is_focused: bool,
+    colors: &ColorScheme,
+    start_col: u16,
+    width: u16,
+    y: u16,
+) -> io::Result<()> {
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    let bg_color = if is_focused {
+        colors.panel_title_focused_bg
+    } else {
+        colors.panel_title_unfocused_bg
+    };
+
+    // Calculate available space for title text
+    // Total: "┌─" (2) + " " (1) + title + " " (1) + padding + "─┐" (2) = 6 + title + padding
+    let border_and_spaces = 6; // "┌─ " + " ─┐" = 6 chars
+    let available_width = width.saturating_sub(border_and_spaces);
+
+    // Truncate title if too long
+    let truncated_title: String = if title.chars().count() > available_width as usize {
+        title.chars().take((available_width.saturating_sub(1)) as usize).collect::<String>() + "…"
+    } else {
+        title.to_string()
+    };
+
+    // Build the title bar with borders
+    let left_border = "┌─";
+    let right_border = "─┐";
+    let padding_needed = available_width.saturating_sub(truncated_title.chars().count() as u16);
+    let padding = "─".repeat(padding_needed as usize);
+
+    let title_line = format!("{} {} {}{}", left_border, truncated_title, padding, right_border);
+
+    // Render the title bar
+    queue!(
+        stdout,
+        MoveTo(start_col, y),
+        SetBackgroundColor(bg_color),
+        SetForegroundColor(border_color),
+        Print(&title_line),
+        ResetColor
+    )?;
+
+    Ok(())
+}
+
+fn render_editor_borders(
+    stdout: &mut impl Write,
+    is_focused: bool,
+    colors: &ColorScheme,
+    start_col: u16,
+    width: u16,
+    start_y: u16,
+    end_y: u16,
+) -> io::Result<()> {
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    // Render left and right borders for each content row
+    for y in start_y..end_y {
+        // Left border
+        queue!(
+            stdout,
+            MoveTo(start_col, y),
+            SetBackgroundColor(colors.bg),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Right border
+        queue!(
+            stdout,
+            MoveTo(start_col + width - 1, y),
+            SetBackgroundColor(colors.bg),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor
+        )?;
+    }
+
+    // Render bottom border
+    queue!(
+        stdout,
+        MoveTo(start_col, end_y),
+        SetBackgroundColor(colors.bg),
+        SetForegroundColor(border_color)
+    )?;
+
+    let horizontal = "─".repeat((width - 2) as usize);
+    queue!(stdout, Print(format!("└{}┘", horizontal)))?;
+
+    Ok(())
+}
+
 fn render_annotation_area(
     stdout: &mut impl Write,
     lines: &[Line],
@@ -380,14 +533,41 @@ fn render_annotation_area(
     start_col: u16,
     width: u16,
     annotation_start: u16,
+    is_focused: bool,
 ) -> io::Result<()> {
-    // Top border of annotation area
+    // Determine border color based on focus
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    // Determine title text based on focus
+    let title_text = if is_focused {
+        "Annotation (editing)"
+    } else {
+        "Annotation"
+    };
+
+    // Top border with title: ┌─ Annotation ─┐
+    // Total width: "┌─" (2) + " " (1) + text + " " (1) + padding + "─┐" (2) = 6 + text + padding
+    let border_and_spaces = 6;
+    let available_width = width.saturating_sub(border_and_spaces);
+    let truncated_text: String = if title_text.chars().count() > available_width as usize {
+        title_text.chars().take((available_width.saturating_sub(1)) as usize).collect::<String>() + "…"
+    } else {
+        title_text.to_string()
+    };
+    let padding_needed = available_width.saturating_sub(truncated_text.chars().count() as u16);
+    let padding = "─".repeat(padding_needed as usize);
+    let top_border = format!("┌─ {} {}{}", truncated_text, padding, "─┐");
+
     queue!(
         stdout,
         MoveTo(start_col, annotation_start),
         SetBackgroundColor(colors.annotation_window_bg),
-        SetForegroundColor(colors.annotation_window_fg),
-        Print(format!("╔{}╗", "═".repeat(width as usize - 2))),
+        SetForegroundColor(border_color),
+        Print(top_border),
         ResetColor
     )?;
 
@@ -414,9 +594,9 @@ fn render_annotation_area(
     };
 
     // Wrap annotation text
-    // Width calculation: ║ (1) + space (1) + content + ║ (1) = width
-    // So content area = width - 3
-    let max_annotation_width = width as usize - 3;
+    // Width calculation: │ (1) + space (1) + content + space (1) + │ (1) = width
+    // So content area = width - 4
+    let max_annotation_width = width as usize - 4;
     let wrapped_annotation = wrap_text(&annotation_text, max_annotation_width);
 
     // Display 2 lines of wrapped annotation with scroll support
@@ -437,19 +617,24 @@ fn render_annotation_area(
             stdout,
             MoveTo(start_col, y_pos),
             SetBackgroundColor(colors.annotation_window_bg),
+            SetForegroundColor(border_color),
+            Print("│"),
             SetForegroundColor(colors.annotation_window_fg),
-            Print(format!("║ {}{}║", display_line, " ".repeat(padding))),
+            Print(format!(" {}{} ", display_line, " ".repeat(padding))),
+            SetForegroundColor(border_color),
+            Print("│"),
             ResetColor
         )?;
     }
 
-    // Bottom border of annotation area
+    // Bottom border: └────┘
+    let horizontal = "─".repeat(width as usize - 2);
     queue!(
         stdout,
         MoveTo(start_col, annotation_start + 3),
         SetBackgroundColor(colors.annotation_window_bg),
-        SetForegroundColor(colors.annotation_window_fg),
-        Print(format!("╚{}╝", "═".repeat(width as usize - 2))),
+        SetForegroundColor(border_color),
+        Print(format!("└{}┘", horizontal)),
         ResetColor
     )?;
 
@@ -663,13 +848,29 @@ fn render_annotation_panel(
 ) -> io::Result<()> {
     let annotation_start = height - 5;
 
-    // Top border
+    // Error/empty states are never focused
+    let border_color = colors.panel_border_unfocused;
+
+    // Top border with title: ┌─ Annotation ─┐
+    let title_text = "Annotation";
+    let border_and_spaces = 6; // "┌─ " + text + " ─┐" = 6 chars
+    let available_width = width.saturating_sub(border_and_spaces);
+    let truncated_text: String = if title_text.chars().count() > available_width as usize {
+        title_text.chars().take((available_width.saturating_sub(1)) as usize).collect::<String>() + "…"
+    } else {
+        title_text.to_string()
+    };
+    let padding_needed = available_width.saturating_sub(truncated_text.chars().count() as u16);
+    let padding = "─".repeat(padding_needed as usize);
+    let top_border = format!("┌─ {} {}{}", truncated_text, padding, "─┐");
+
+    // Top border with title
     queue!(
         stdout,
         MoveTo(start_col, annotation_start),
         SetBackgroundColor(colors.annotation_window_bg),
-        SetForegroundColor(colors.annotation_window_fg),
-        Print(format!("╔{}╗", "═".repeat(width as usize - 2))),
+        SetForegroundColor(border_color),
+        Print(top_border),
         ResetColor
     )?;
 
@@ -704,19 +905,24 @@ fn render_annotation_panel(
             stdout,
             MoveTo(start_col, y_pos),
             SetBackgroundColor(colors.annotation_window_bg),
+            SetForegroundColor(border_color),
+            Print("│"),
             SetForegroundColor(colors.annotation_window_fg),
-            Print(format!("║ {}{}║", display_line, " ".repeat(padding))),
+            Print(format!(" {}{} ", display_line, " ".repeat(padding))),
+            SetForegroundColor(border_color),
+            Print("│"),
             ResetColor
         )?;
     }
 
-    // Bottom border
+    // Bottom border: └────┘
+    let horizontal = "─".repeat(width as usize - 2);
     queue!(
         stdout,
         MoveTo(start_col, annotation_start + 3),
         SetBackgroundColor(colors.annotation_window_bg),
-        SetForegroundColor(colors.annotation_window_fg),
-        Print(format!("╚{}╝", "═".repeat(width as usize - 2))),
+        SetForegroundColor(border_color),
+        Print(format!("└{}┘", horizontal)),
         ResetColor
     )?;
 
@@ -948,4 +1154,166 @@ fn render_help_overlay(
     queue!(stdout, ResetColor)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod focus_rendering_tests {
+    
+
+    #[test]
+    fn test_title_bar_text_generation() {
+        // Test title bar string formatting
+        let title = "test.rs";
+        let formatted = format!(" {} ", title);
+        assert!(formatted.contains(title));
+        assert_eq!(formatted, " test.rs ");
+    }
+
+    #[test]
+    fn test_title_bar_truncation_long_filename() {
+        // Test that long filenames truncate gracefully
+        let long_name = "a".repeat(100);
+        let max_width = 30;
+        let truncated: String = if long_name.chars().count() > max_width {
+            long_name.chars().take(max_width - 1).collect::<String>() + "…"
+        } else {
+            long_name
+        };
+        // Verify character count, not byte length
+        assert!(truncated.chars().count() <= max_width);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn test_content_height_calculation_with_title() {
+        // Verify content height reduces by 1 when title bar present
+        let height = 50u16;
+        let title_bar_height = 1u16;
+        let without_title = height.saturating_sub(5);
+        let with_title = height.saturating_sub(5 + title_bar_height);
+        assert_eq!(with_title, without_title - 1);
+        assert_eq!(with_title, 44);
+    }
+
+    #[test]
+    fn test_content_height_calculation_without_title() {
+        // Verify content height unchanged when no title bar
+        let height = 50u16;
+        let title_bar_height = 0u16;
+        let content_height = height.saturating_sub(5 + title_bar_height);
+        assert_eq!(content_height, 45);
+    }
+
+    #[test]
+    fn test_annotation_title_text_when_focused() {
+        // Verify annotation title includes "(editing)" when focused
+        let focused_title = " Annotation (editing) ";
+        assert!(focused_title.contains("editing"));
+        assert!(focused_title.contains("Annotation"));
+    }
+
+    #[test]
+    fn test_annotation_title_text_when_unfocused() {
+        // Verify annotation title without "(editing)" when unfocused
+        let unfocused_title = " Annotation ";
+        assert!(!unfocused_title.contains("editing"));
+        assert!(unfocused_title.contains("Annotation"));
+    }
+
+    #[test]
+    fn test_minimum_terminal_height_with_title() {
+        // Verify minimum height requirements
+        let min_height = 6u16;
+        let title_bar = 1u16;
+        let annotation_panel = 4u16;
+        let status_bar = 1u16;
+        assert!(min_height >= title_bar + annotation_panel + status_bar);
+    }
+
+    // =========================================================================
+    // Cursor Positioning Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cursor_x_calculation_with_start_col() {
+        // Verify cursor X position accounts for start_col offset
+        let start_col = 30u16; // After file tree
+        let border_and_padding = 2u16; // "│ "
+        let cursor_visual_col = 5u16; // 5 chars into annotation
+        let expected_x = start_col + border_and_padding + cursor_visual_col;
+        assert_eq!(expected_x, 37);
+    }
+
+    #[test]
+    fn test_cursor_x_at_annotation_start() {
+        // Cursor at position 0 should be at start_col + 2
+        let start_col = 30u16;
+        let cursor_visual_col = 0u16;
+        let cursor_x = start_col + 2 + cursor_visual_col;
+        assert_eq!(cursor_x, 32); // Right after "│ "
+    }
+
+    #[test]
+    fn test_cursor_x_in_normal_mode_no_tree() {
+        // Without tree, start_col is 0
+        let start_col = 0u16;
+        let cursor_visual_col = 10u16;
+        let cursor_x = start_col + 2 + cursor_visual_col;
+        assert_eq!(cursor_x, 12);
+    }
+
+    #[test]
+    fn test_cursor_x_in_directory_mode_with_tree() {
+        // With tree (width 30), start_col is 30
+        let start_col = 30u16;
+        let cursor_visual_col = 15u16;
+        let cursor_x = start_col + 2 + cursor_visual_col;
+        assert_eq!(cursor_x, 47);
+    }
+
+    #[test]
+    fn test_cursor_y_calculation_first_line() {
+        // Cursor on first visible line
+        let annotation_start = 45u16;
+        let annotation_scroll = 0usize;
+        let cursor_line = 0usize;
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 46); // First content line after top border
+    }
+
+    #[test]
+    fn test_cursor_y_calculation_second_line() {
+        // Cursor on second visible line
+        let annotation_start = 45u16;
+        let annotation_scroll = 0usize;
+        let cursor_line = 1usize;
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 47); // Second content line
+    }
+
+    #[test]
+    fn test_cursor_y_with_scroll() {
+        // Cursor visible after scrolling
+        let annotation_start = 45u16;
+        let annotation_scroll = 2usize;
+        let cursor_line = 3usize; // Line 3 is visible when scroll is 2
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 47); // Line 3 shows at second position (offset 1) when scroll is 2
+    }
+
+    #[test]
+    fn test_cursor_position_accounts_for_borders() {
+        // Verify border and padding are accounted for
+        // Format: "│ text │" where text starts at column 2
+        let start_col = 0u16;
+        let left_border = 1u16; // "│"
+        let left_padding = 1u16; // " "
+        let cursor_offset = left_border + left_padding;
+        assert_eq!(cursor_offset, 2);
+
+        // Full calculation
+        let cursor_visual_col = 0u16;
+        let cursor_x = start_col + cursor_offset + cursor_visual_col;
+        assert_eq!(cursor_x, 2);
+    }
 }

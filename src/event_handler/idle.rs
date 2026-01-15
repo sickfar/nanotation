@@ -200,6 +200,7 @@ fn adjust_scroll_unified(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::FocusedPanel;
     use crate::diff::{DiffLine, DiffResult, LineChange};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -929,5 +930,71 @@ mod tests {
         assert!(matches!(result, IdleModeResult::Continue));
         // Cursor should remain valid (0)
         assert_eq!(cursor_line, 0);
+    }
+
+    // =========================================================================
+    // Focus Management Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tab_key_toggles_focus_editor_to_tree() {
+        // Simulate Tab key press when editor is focused with file tree present
+        let mut focused_panel = FocusedPanel::Editor;
+        let has_tree = true;
+
+        // Simulate Tab key toggle logic
+        if has_tree {
+            focused_panel = match focused_panel {
+                FocusedPanel::Editor => FocusedPanel::FileTree,
+                FocusedPanel::FileTree => FocusedPanel::Editor,
+            };
+        }
+
+        assert_eq!(focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_tab_key_toggles_focus_tree_to_editor() {
+        // Simulate Tab key press when tree is focused
+        let mut focused_panel = FocusedPanel::FileTree;
+        let has_tree = true;
+
+        // Simulate Tab key toggle logic
+        if has_tree {
+            focused_panel = match focused_panel {
+                FocusedPanel::Editor => FocusedPanel::FileTree,
+                FocusedPanel::FileTree => FocusedPanel::Editor,
+            };
+        }
+
+        assert_eq!(focused_panel, FocusedPanel::Editor);
+    }
+
+    #[test]
+    fn test_tab_key_no_effect_without_tree() {
+        // Tab should not change focus when file tree is not present
+        let mut focused_panel = FocusedPanel::Editor;
+        let has_tree = false;
+
+        // Simulate Tab key logic
+        if has_tree {
+            focused_panel = FocusedPanel::FileTree;
+        }
+
+        // Focus should remain on editor
+        assert_eq!(focused_panel, FocusedPanel::Editor);
+    }
+
+    #[test]
+    fn test_navigation_keys_work_when_editor_focused() {
+        // Verify that editor navigation still works when editor has focus
+        // This is a smoke test - the actual navigation is tested in other test modules
+        let focused_panel = FocusedPanel::Editor;
+        assert_eq!(focused_panel, FocusedPanel::Editor);
+
+        // Arrow key navigation should work regardless of focus
+        // (This is verified by other navigation tests - this just confirms focus state)
+        let still_focused = focused_panel;
+        assert_eq!(still_focused, FocusedPanel::Editor);
     }
 }

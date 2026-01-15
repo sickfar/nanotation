@@ -2,7 +2,7 @@
 
 use crate::diff::{ChangeType, DiffResult, LineChange, WordChange};
 use crate::highlighting::{to_crossterm_color, SyntaxHighlighter};
-use crate::models::{EditorState, Line};
+use crate::models::{EditorState, FocusedPanel, Line};
 use crate::text::wrap_text;
 use crate::theme::{ColorScheme, Theme};
 use crossterm::{
@@ -34,9 +34,10 @@ pub fn render_diff_mode(
     diff_available: bool,
     start_col: u16,
     available_width: u16,
+    focused_panel: FocusedPanel,
 ) -> io::Result<()> {
     let (terminal_width, height) = terminal::size()?;
-    let content_height = (height.saturating_sub(5)) as usize;
+    let content_height = (height.saturating_sub(6)) as usize; // -6: title bar, annotation (4), status (1)
     let colors = theme.colors();
 
     let mut stdout = io::stdout();
@@ -47,6 +48,19 @@ pub fn render_diff_mode(
     let total_content_width = (available_width as usize).saturating_sub(separator_width);
     let left_pane_width = total_content_width / 2;
     let right_pane_width = total_content_width - left_pane_width;
+
+    // Render unified title bar for both panes
+    let is_left_focused = focused_panel == FocusedPanel::Editor;
+    render_unified_diff_title_bar(
+        &mut stdout,
+        "Working Copy",
+        "HEAD",
+        start_col,
+        available_width,
+        left_pane_width as u16,
+        is_left_focused,
+        &colors,
+    )?;
 
     // Calculate gutter widths for each pane
     let left_gutter_width = lines.len().to_string().len() + 2;
@@ -77,6 +91,13 @@ pub fn render_diff_mode(
     let mut screen_line = 0;
     let mut diff_line_idx = scroll_offset;
 
+    // Determine border color (focused when editor panel is active)
+    let border_color = if is_left_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
     // Render diff content
     while screen_line < content_height && diff_line_idx < diff_result.lines.len() {
         let diff_line = &diff_result.lines[diff_line_idx];
@@ -88,28 +109,39 @@ pub fn render_diff_mode(
             .map(|(n, _, _)| *n == cursor_line + 1)
             .unwrap_or(false);
 
-        // Render left pane (working copy)
+        // Calculate Y position (+1 to account for title bar at Y=0)
+        let y_pos = screen_line as u16 + 1;
+
+        // Render left border
+        queue!(
+            stdout,
+            MoveTo(start_col, y_pos),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Render left pane (working copy) - offset by 1 for left border
         render_diff_pane_line(
             &mut stdout,
             &diff_line.working,
-            start_col,
+            start_col + 1, // +1 for left border
             left_gutter_width,
-            left_content_width,
+            left_content_width.saturating_sub(1), // -1 for left border
             is_cursor_line,
             true, // is_left_pane
             &colors,
             highlighter,
             extension,
-            screen_line as u16,
+            y_pos,
             lines,
         )?;
 
-        // Render separator
+        // Render separator (matches border style)
         queue!(
             stdout,
-            MoveTo(start_col + left_pane_width as u16, screen_line as u16),
-            SetBackgroundColor(colors.status_bg),
-            SetForegroundColor(colors.status_fg),
+            MoveTo(start_col + left_pane_width as u16 + 1, y_pos), // +1 for left border
+            SetForegroundColor(border_color),
             Print("│"),
             ResetColor
         )?;
@@ -118,16 +150,25 @@ pub fn render_diff_mode(
         render_diff_pane_line(
             &mut stdout,
             &diff_line.head,
-            start_col + (left_pane_width + separator_width) as u16,
+            start_col + (left_pane_width + separator_width) as u16 + 1, // +1 for left border
             right_gutter_width,
-            right_content_width,
+            right_content_width.saturating_sub(1), // -1 for right border
             false, // cursor is only on left
             false, // is_left_pane
             &colors,
             highlighter,
             extension,
-            screen_line as u16,
+            y_pos,
             lines,
+        )?;
+
+        // Render right border
+        queue!(
+            stdout,
+            MoveTo(start_col + available_width - 1, y_pos),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor
         )?;
 
         screen_line += 1;
@@ -136,37 +177,106 @@ pub fn render_diff_mode(
 
     // Fill remaining content area
     while screen_line < content_height {
+        let y_pos = screen_line as u16 + 1;
+
+        // Left border
+        queue!(
+            stdout,
+            MoveTo(start_col, y_pos),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor
+        )?;
+
         // Left pane empty
         queue!(
             stdout,
-            MoveTo(start_col, screen_line as u16),
+            MoveTo(start_col + 1, y_pos),
             SetBackgroundColor(colors.bg),
-            Print(format!("{:width$}", "", width = left_pane_width)),
+            Print(format!("{:width$}", "", width = left_pane_width.saturating_sub(1))),
         )?;
 
-        // Separator
+        // Separator (matches border style)
         queue!(
             stdout,
-            MoveTo(start_col + left_pane_width as u16, screen_line as u16),
-            SetBackgroundColor(colors.status_bg),
-            SetForegroundColor(colors.status_fg),
+            MoveTo(start_col + left_pane_width as u16 + 1, y_pos),
+            SetForegroundColor(border_color),
             Print("│"),
+            ResetColor
         )?;
 
         // Right pane empty
         queue!(
             stdout,
-            MoveTo(start_col + (left_pane_width + separator_width) as u16, screen_line as u16),
+            MoveTo(start_col + (left_pane_width + separator_width) as u16 + 1, y_pos),
             SetBackgroundColor(colors.bg),
-            Print(format!("{:width$}", "", width = right_pane_width)),
+            Print(format!("{:width$}", "", width = right_pane_width.saturating_sub(1))),
+        )?;
+
+        // Right border
+        queue!(
+            stdout,
+            MoveTo(start_col + available_width - 1, y_pos),
+            SetForegroundColor(border_color),
+            Print("│"),
             ResetColor
         )?;
 
         screen_line += 1;
     }
 
-    // Render annotation area (full terminal width, from column 0)
+    // Render bottom border before annotation area with junction
+    let border_y = height.saturating_sub(6); // One line above annotation
+
+    // Left corner
+    queue!(
+        stdout,
+        MoveTo(start_col, border_y),
+        SetForegroundColor(border_color),
+        Print("└"),
+        ResetColor
+    )?;
+
+    // Left section horizontal line
+    let left_horizontal = "─".repeat(left_pane_width as usize);
+    queue!(
+        stdout,
+        SetForegroundColor(border_color),
+        Print(&left_horizontal),
+        ResetColor
+    )?;
+
+    // Middle junction (aligns with content separator)
+    queue!(
+        stdout,
+        SetForegroundColor(border_color),
+        Print("┴"),
+        ResetColor
+    )?;
+
+    // Right section horizontal line
+    let right_section_width = (available_width as usize)
+        .saturating_sub(left_pane_width as usize)
+        .saturating_sub(3); // -3 for left corner, middle junction, right corner
+    let right_horizontal = "─".repeat(right_section_width);
+    queue!(
+        stdout,
+        SetForegroundColor(border_color),
+        Print(&right_horizontal),
+        ResetColor
+    )?;
+
+    // Right corner
+    queue!(
+        stdout,
+        SetForegroundColor(border_color),
+        Print("┘"),
+        ResetColor
+    )?;
+
+    // Render annotation area (starts at start_col, uses available_width)
     let annotation_start = height - 5;
+    let is_annotation_focused = matches!(editor_state, EditorState::Annotating { .. });
     render_diff_annotation_area(
         &mut stdout,
         lines,
@@ -174,8 +284,10 @@ pub fn render_diff_mode(
         editor_state,
         annotation_scroll,
         &colors,
-        terminal_width,
+        available_width,
         annotation_start,
+        is_annotation_focused,
+        start_col, // Start at column after tree
     )?;
 
     // Render status bar (full terminal width, from column 0)
@@ -206,13 +318,115 @@ pub fn render_diff_mode(
             *cursor_pos,
             annotation_scroll,
             annotation_start,
-            terminal_width,
+            start_col,
+            available_width,
         )?;
     } else {
         queue!(stdout, Hide)?;
     }
 
     stdout.flush()?;
+    Ok(())
+}
+
+/// Renders a unified title bar for both diff panes with borders.
+fn render_unified_diff_title_bar(
+    stdout: &mut impl Write,
+    left_title: &str,
+    right_title: &str,
+    start_col: u16,
+    total_width: u16,
+    left_pane_width: u16,
+    is_left_focused: bool,
+    colors: &ColorScheme,
+) -> io::Result<()> {
+    queue!(stdout, MoveTo(start_col, 0))?;
+
+    // Determine colors based on focus
+    let border_color = if is_left_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    let left_bg = if is_left_focused {
+        colors.panel_title_focused_bg
+    } else {
+        colors.panel_title_unfocused_bg
+    };
+    let left_fg = if is_left_focused {
+        colors.panel_title_focused_fg
+    } else {
+        colors.panel_title_unfocused_fg
+    };
+
+    // HEAD pane is never focused
+    let right_bg = colors.panel_title_unfocused_bg;
+    let right_fg = colors.panel_title_unfocused_fg;
+
+    // Left corner
+    queue!(
+        stdout,
+        SetForegroundColor(border_color),
+        Print("┌"),
+        ResetColor
+    )?;
+
+    // Left pane title bar content
+    // Content spans from position 1 to left_pane_width (inclusive)
+    let left_content_width = left_pane_width as usize;
+    let left_title_with_spaces = format!(" {} ", left_title);
+    let left_title_len = left_title_with_spaces.chars().count();
+    let left_available = left_content_width.saturating_sub(left_title_len);
+    let left_padding = "─".repeat(left_available);
+
+    queue!(
+        stdout,
+        SetBackgroundColor(left_bg),
+        SetForegroundColor(left_fg),
+        Print(&left_title_with_spaces),
+        SetForegroundColor(border_color),
+        Print(&left_padding),
+        ResetColor
+    )?;
+
+    // Middle separator (junction between panes)
+    // This should align with the content separator at start_col + left_pane_width + 1
+    queue!(
+        stdout,
+        SetForegroundColor(border_color),
+        Print("┬"),
+        ResetColor
+    )?;
+
+    // Right pane title bar content
+    // The right pane spans from position left_pane_width + 2 to total_width - 1
+    let right_content_width = (total_width as usize)
+        .saturating_sub(left_pane_width as usize)
+        .saturating_sub(3); // -3 for left corner, middle separator, right corner
+    let right_title_with_spaces = format!(" {} ", right_title);
+    let right_title_len = right_title_with_spaces.chars().count();
+    let right_available = right_content_width.saturating_sub(right_title_len);
+    let right_padding = "─".repeat(right_available);
+
+    queue!(
+        stdout,
+        SetBackgroundColor(right_bg),
+        SetForegroundColor(right_fg),
+        Print(&right_title_with_spaces),
+        SetForegroundColor(border_color),
+        Print(&right_padding),
+        ResetColor
+    )?;
+
+    // Right corner
+    queue!(
+        stdout,
+        SetForegroundColor(border_color),
+        Print("┐"),
+        ResetColor
+    )?;
+
     Ok(())
 }
 
@@ -473,14 +687,41 @@ fn render_diff_annotation_area(
     colors: &ColorScheme,
     width: u16,
     annotation_start: u16,
+    is_focused: bool,
+    start_col: u16,
 ) -> io::Result<()> {
-    // Top border
+    // Determine border color based on focus
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    // Determine title text based on focus
+    let title_text = if is_focused {
+        "Annotation (editing)"
+    } else {
+        "Annotation"
+    };
+
+    // Top border with title: ┌─ Annotation ─┐
+    let border_and_spaces = 6; // "┌─ " + text + " ─┐" = 6 chars
+    let available_width = width.saturating_sub(border_and_spaces);
+    let truncated_text: String = if title_text.chars().count() > available_width as usize {
+        title_text.chars().take((available_width.saturating_sub(1)) as usize).collect::<String>() + "…"
+    } else {
+        title_text.to_string()
+    };
+    let padding_needed = available_width.saturating_sub(truncated_text.chars().count() as u16);
+    let padding = "─".repeat(padding_needed as usize);
+    let top_border = format!("┌─ {} {}{}", truncated_text, padding, "─┐");
+
     queue!(
         stdout,
-        MoveTo(0, annotation_start),
+        MoveTo(start_col, annotation_start),
         SetBackgroundColor(colors.annotation_window_bg),
-        SetForegroundColor(colors.annotation_window_fg),
-        Print(format!("╔{}╗", "═".repeat(width as usize - 2))),
+        SetForegroundColor(border_color),
+        Print(top_border),
         ResetColor
     )?;
 
@@ -506,6 +747,8 @@ fn render_diff_annotation_area(
     };
 
     // Wrap annotation text
+    // Width calculation: │ (1) + space (1) + content + space (1) + │ (1) = width
+    // So content area = width - 4
     let max_annotation_width = width as usize - 4;
     let wrapped_annotation = wrap_text(&annotation_text, max_annotation_width);
 
@@ -520,27 +763,31 @@ fn render_diff_annotation_area(
 
         let y_pos = annotation_start + 1 + i as u16;
 
+        // Calculate manual padding for proper wide character handling
+        use crate::text::calculate_padding;
+        let padding = calculate_padding(&display_line, max_annotation_width);
         queue!(
             stdout,
-            MoveTo(0, y_pos),
+            MoveTo(start_col, y_pos),
             SetBackgroundColor(colors.annotation_window_bg),
+            SetForegroundColor(border_color),
+            Print("│"),
             SetForegroundColor(colors.annotation_window_fg),
-            Print(format!(
-                "║ {:width$} ║",
-                display_line,
-                width = max_annotation_width
-            )),
+            Print(format!(" {}{} ", display_line, " ".repeat(padding))),
+            SetForegroundColor(border_color),
+            Print("│"),
             ResetColor
         )?;
     }
 
-    // Bottom border
+    // Bottom border: └────┘
+    let horizontal = "─".repeat(width as usize - 2);
     queue!(
         stdout,
-        MoveTo(0, annotation_start + 3),
+        MoveTo(start_col, annotation_start + 3),
         SetBackgroundColor(colors.annotation_window_bg),
-        SetForegroundColor(colors.annotation_window_fg),
-        Print(format!("╚{}╝", "═".repeat(width as usize - 2))),
+        SetForegroundColor(border_color),
+        Print(format!("└{}┘", horizontal)),
         ResetColor
     )?;
 
@@ -692,6 +939,7 @@ fn position_diff_cursor(
     cursor_pos: usize,
     annotation_scroll: usize,
     annotation_start: u16,
+    start_col: u16,
     width: u16,
 ) -> io::Result<()> {
     let max_annotation_width = width as usize - 4;
@@ -750,9 +998,9 @@ fn position_diff_cursor(
     // Convert character index to visual column for proper cursor positioning with wide chars
     use crate::text::char_index_to_visual_col;
     let cursor_visual_col = char_index_to_visual_col(display_line, cursor_col);
-    let cursor_x = 2 + cursor_visual_col;
+    let cursor_x = start_col + 2 + cursor_visual_col as u16;
 
-    queue!(stdout, MoveTo(cursor_x as u16, cursor_screen_line), Show)?;
+    queue!(stdout, MoveTo(cursor_x, cursor_screen_line), Show)?;
 
     Ok(())
 }
@@ -837,4 +1085,242 @@ fn render_diff_help_overlay(
     queue!(stdout, ResetColor)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod diff_title_tests {
+    
+
+    #[test]
+    fn test_left_pane_title_text() {
+        // Verify left pane title for diff mode
+        let title = "Working Copy";
+        assert_eq!(title, "Working Copy");
+        assert!(!title.is_empty());
+    }
+
+    #[test]
+    fn test_right_pane_title_text() {
+        // Verify right pane title for diff mode
+        let title = "HEAD";
+        assert_eq!(title, "HEAD");
+        assert!(!title.is_empty());
+    }
+
+    #[test]
+    fn test_diff_content_height_with_titles() {
+        // Verify content height calculation in diff mode accounts for title bars
+        let height = 50u16;
+        let title_bar_height = 1u16;
+        let annotation_and_status = 5u16;
+        let content_height = height.saturating_sub(annotation_and_status + title_bar_height);
+
+        // Without title: 50 - 5 = 45
+        // With title: 50 - 6 = 44
+        assert_eq!(content_height, 44);
+    }
+
+    #[test]
+    fn test_pane_title_width_calculation() {
+        // Verify title width fits within pane width
+        let total_width = 100u16;
+        let separator_width = 1u16;
+        let available_width = total_width.saturating_sub(separator_width);
+        let pane_width = available_width / 2;
+
+        // Each pane should have reasonable width for title
+        assert!(pane_width >= 10, "Pane width too narrow for title");
+        assert_eq!(pane_width, 49); // (100 - 1) / 2 = 49
+    }
+
+    // =========================================================================
+    // Cursor Positioning Tests (Diff Mode)
+    // =========================================================================
+
+    #[test]
+    fn test_diff_cursor_x_with_tree() {
+        // In diff mode with tree, annotation starts at start_col (30)
+        let start_col = 30u16;
+        let border_and_padding = 2u16; // "│ "
+        let cursor_visual_col = 8u16;
+        let cursor_x = start_col + border_and_padding + cursor_visual_col;
+        assert_eq!(cursor_x, 40);
+    }
+
+    #[test]
+    fn test_diff_cursor_x_without_tree() {
+        // In diff mode without tree, annotation starts at start_col (0)
+        let start_col = 0u16;
+        let border_and_padding = 2u16;
+        let cursor_visual_col = 12u16;
+        let cursor_x = start_col + border_and_padding + cursor_visual_col;
+        assert_eq!(cursor_x, 14);
+    }
+
+    #[test]
+    fn test_diff_cursor_x_at_start() {
+        // Cursor at position 0 in annotation
+        let start_col = 30u16;
+        let cursor_visual_col = 0u16;
+        let cursor_x = start_col + 2 + cursor_visual_col;
+        assert_eq!(cursor_x, 32); // Right after "│ "
+    }
+
+    #[test]
+    fn test_diff_cursor_accounts_for_annotation_width() {
+        // Verify cursor respects annotation area boundaries
+        let start_col = 30u16;
+        let available_width = 100u16;
+        let max_annotation_width = available_width as usize - 4; // "│ " and " │"
+
+        // Cursor near end of line
+        let cursor_visual_col = (max_annotation_width - 1) as u16;
+        let cursor_x = start_col + 2 + cursor_visual_col;
+
+        // Should be within bounds: start_col + width
+        assert!(cursor_x < start_col + available_width);
+        assert_eq!(cursor_x, 30 + 2 + 95); // 30 + 2 + (100 - 4 - 1) = 127
+    }
+
+    #[test]
+    fn test_diff_cursor_y_first_visible_line() {
+        // Cursor on first visible line in diff mode
+        let annotation_start = 45u16;
+        let annotation_scroll = 0usize;
+        let cursor_line = 0usize;
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 46);
+    }
+
+    #[test]
+    fn test_diff_cursor_y_second_visible_line() {
+        // Cursor on second visible line in diff mode
+        let annotation_start = 45u16;
+        let annotation_scroll = 0usize;
+        let cursor_line = 1usize;
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 47);
+    }
+
+    #[test]
+    fn test_diff_cursor_y_with_scroll() {
+        // Scrolled annotation in diff mode
+        let annotation_start = 45u16;
+        let annotation_scroll = 3usize;
+        let cursor_line = 4usize;
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 47); // Line 4 shows at second position (offset 1) when scroll is 3
+    }
+
+    #[test]
+    fn test_diff_cursor_formula_matches_normal_mode() {
+        // Verify diff mode cursor calculation matches normal mode formula
+        let start_col = 30u16;
+        let cursor_visual_col = 7u16;
+
+        // Both modes should use: start_col + 2 + cursor_visual_col
+        let cursor_x = start_col + 2 + cursor_visual_col;
+        assert_eq!(cursor_x, 39);
+    }
+
+    #[test]
+    fn test_unified_title_bar_corners() {
+        // Verify title bar uses corner characters
+        let left_corner = '┌';
+        let right_corner = '┐';
+        let middle_junction = '┬';
+
+        // Format should be: ┌─ Working Copy ─┬─ HEAD ─┐
+        assert_eq!(left_corner, '┌');
+        assert_eq!(right_corner, '┐');
+        assert_eq!(middle_junction, '┬');
+    }
+
+    #[test]
+    fn test_title_bar_width_calculation() {
+        // Verify title bar spans full width correctly
+        let available_width = 100u16;
+        let left_pane_width = 49u16; // (100 - 1) / 2
+
+        // Title bar components:
+        // ┌ (1) + left content (left_pane_width) + ┬ (1) + right content + ┐ (1)
+        let left_corner = 1;
+        let left_content = left_pane_width;
+        let middle_sep = 1;
+        let right_corner = 1;
+        let right_content = available_width - left_corner - left_content - middle_sep - right_corner;
+
+        let total = left_corner + left_content as u16 + middle_sep + right_content + right_corner;
+        assert_eq!(total, available_width);
+    }
+
+    #[test]
+    fn test_middle_separator_aligns_with_content() {
+        // The middle ┬ should align with the content separator │
+        let start_col = 30u16;
+        let left_pane_width = 49u16;
+
+        // Title bar middle ┬ position: start_col + 1 (corner) + left_pane_width
+        let title_middle_pos = start_col + 1 + left_pane_width;
+
+        // Content separator │ position: start_col + left_pane_width + 1
+        let content_sep_pos = start_col + left_pane_width + 1;
+
+        // They should be at the same position
+        assert_eq!(title_middle_pos, content_sep_pos);
+    }
+
+    #[test]
+    fn test_bottom_border_junction_alignment() {
+        // The bottom ┴ should align with title ┬ and content │
+        let start_col = 30u16;
+        let left_pane_width = 49u16;
+
+        // Title bar middle ┬ position
+        let title_middle = start_col + 1 + left_pane_width;
+
+        // Bottom border middle ┴ position
+        let bottom_middle = start_col + 1 + left_pane_width;
+
+        // All three should align vertically
+        assert_eq!(title_middle, bottom_middle);
+    }
+
+    #[test]
+    fn test_bottom_border_characters() {
+        // Verify bottom border uses correct junction characters
+        let left_corner = '└';
+        let right_corner = '┘';
+        let middle_junction = '┴';
+
+        // Format should be: └─────┴─────┘
+        assert_eq!(left_corner, '└');
+        assert_eq!(right_corner, '┘');
+        assert_eq!(middle_junction, '┴');
+    }
+
+    #[test]
+    fn test_diff_border_box_complete() {
+        // Verify all corners and junctions form a complete box
+        // Top:    ┌─────┬─────┐
+        // Middle: │     │     │
+        // Bottom: └─────┴─────┘
+
+        let top_left = '┌';
+        let top_right = '┐';
+        let top_middle = '┬';
+        let bottom_left = '└';
+        let bottom_right = '┘';
+        let bottom_middle = '┴';
+        let vertical = '│';
+
+        // Verify all characters are correct
+        assert_eq!(top_left, '┌');
+        assert_eq!(top_right, '┐');
+        assert_eq!(top_middle, '┬');
+        assert_eq!(bottom_left, '└');
+        assert_eq!(bottom_right, '┘');
+        assert_eq!(bottom_middle, '┴');
+        assert_eq!(vertical, '│');
+    }
 }

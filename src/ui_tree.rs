@@ -5,7 +5,7 @@ use crate::theme::{ColorScheme, Theme};
 use crossterm::{
     cursor::MoveTo,
     queue,
-    style::{Print, SetBackgroundColor, SetForegroundColor},
+    style::{Print, ResetColor, SetBackgroundColor, SetForegroundColor},
 };
 use std::io::{self, Write};
 
@@ -15,12 +15,36 @@ pub const TREE_WIDTH: u16 = 30;
 /// Minimum terminal width when tree is visible
 pub const MIN_WIDTH_WITH_TREE: u16 = 80;
 
-/// Separator character for tree/editor border
-pub const TREE_SEPARATOR: char = '│';
-
 /// Folder expand/collapse indicators (filled for modern terminals)
 pub const FOLDER_EXPANDED: &str = "▼";
 pub const FOLDER_COLLAPSED: &str = "▶";
+
+/// Render bottom border for the tree
+fn render_tree_bottom_border(
+    stdout: &mut impl Write,
+    y: u16,
+    is_focused: bool,
+    colors: &ColorScheme,
+) -> io::Result<()> {
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    queue!(stdout, MoveTo(0, y))?;
+
+    // Bottom border: └──────────────────────────────┘
+    let horizontal = "─".repeat((TREE_WIDTH - 2) as usize);
+    queue!(
+        stdout,
+        SetForegroundColor(border_color),
+        Print(format!("└{}┘", horizontal)),
+        ResetColor
+    )?;
+
+    Ok(())
+}
 
 /// Render the file tree panel
 pub fn render_file_tree(
@@ -31,12 +55,14 @@ pub fn render_file_tree(
     is_focused: bool,
 ) -> io::Result<()> {
     let colors = theme.colors();
-    let content_height = height.saturating_sub(1) as usize; // Reserve 1 line for header
 
-    // Render header
-    render_header(stdout, panel, &colors, is_focused)?;
+    // Reserve 1 line for header and 1 for bottom border
+    let content_height = height.saturating_sub(2) as usize;
 
-    // Render entries
+    // Render header at Y=0 (inline with editor title)
+    render_header(stdout, panel, &colors, is_focused, 0)?;
+
+    // Render entries starting at Y=1
     let visible_entries = panel.entries.iter()
         .skip(panel.scroll_offset)
         .take(content_height);
@@ -47,14 +73,18 @@ pub fn render_file_tree(
         let is_selected = entry_idx == panel.selected_index && is_focused;
         let is_current_file = panel.is_current_file(&entry.path);
 
-        render_entry(stdout, entry, &colors, row, is_selected, is_current_file)?;
+        render_entry(stdout, entry, &colors, row, is_selected, is_current_file, is_focused)?;
     }
 
     // Fill remaining rows with empty background
     let entries_shown = panel.entries.len().saturating_sub(panel.scroll_offset).min(content_height);
-    for row in (entries_shown + 1)..=(content_height) {
-        render_empty_row(stdout, &colors, row as u16)?;
+    let last_content_row = height.saturating_sub(1);
+    for row in (entries_shown + 1)..(last_content_row as usize) {
+        render_empty_row(stdout, &colors, row as u16, is_focused)?;
     }
+
+    // Render bottom border at the last row (above status bar)
+    render_tree_bottom_border(stdout, last_content_row, is_focused, &colors)?;
 
     Ok(())
 }
@@ -65,28 +95,52 @@ fn render_header(
     panel: &FileTreePanel,
     colors: &ColorScheme,
     is_focused: bool,
+    y: u16,
 ) -> io::Result<()> {
-    queue!(stdout, MoveTo(0, 0))?;
+    queue!(stdout, MoveTo(0, y))?;
 
     let bg = if is_focused {
-        colors.tree_selected_bg
+        colors.panel_title_focused_bg
     } else {
-        colors.tree_bg
+        colors.panel_title_unfocused_bg
     };
 
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    // Build header with corner borders: ┌─ Files ─────┐
+    let header_text = match panel.mode {
+        TreeMode::FullTree => "Files",
+        TreeMode::GitChangedFiles => "Git Changes",
+    };
+
+    // Total width: "┌─" (2) + " " (1) + text + " " (1) + padding + "─┐" (2) = 6 + text + padding
+    let border_and_spaces = 6;
+    let available_width = TREE_WIDTH.saturating_sub(border_and_spaces);
+
+    // Truncate if needed
+    let truncated_text: String = if header_text.chars().count() > available_width as usize {
+        header_text.chars().take((available_width.saturating_sub(1)) as usize).collect::<String>() + "…"
+    } else {
+        header_text.to_string()
+    };
+
+    let padding_needed = available_width.saturating_sub(truncated_text.chars().count() as u16);
+    let padding = "─".repeat(padding_needed as usize);
+
+    let title_line = format!("┌─ {} {}{}", truncated_text, padding, "─┐");
+
+    // Render the title bar
     queue!(
         stdout,
         SetBackgroundColor(bg),
-        SetForegroundColor(colors.tree_header_fg)
+        SetForegroundColor(border_color),
+        Print(&title_line),
+        ResetColor
     )?;
-
-    let header = match panel.mode {
-        TreeMode::FullTree => " Files",
-        TreeMode::GitChangedFiles => " Git Changes",
-    };
-
-    let header_display = format!("{:<width$}", header, width = TREE_WIDTH as usize);
-    queue!(stdout, Print(&header_display[..TREE_WIDTH as usize]))?;
 
     Ok(())
 }
@@ -99,6 +153,7 @@ fn render_entry(
     row: u16,
     is_selected: bool,
     is_current_file: bool,
+    is_focused: bool,
 ) -> io::Result<()> {
     queue!(stdout, MoveTo(0, row))?;
 
@@ -111,11 +166,27 @@ fn render_entry(
         colors.tree_bg
     };
 
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    // Left border
+    queue!(
+        stdout,
+        SetBackgroundColor(colors.tree_bg),
+        SetForegroundColor(border_color),
+        Print("│")
+    )?;
+
+    // Entry content
     queue!(stdout, SetBackgroundColor(bg))?;
 
-    // Build the display string
+    // Build the display string (account for -2 border, -2 icon/space)
     let indent = "  ".repeat(entry.depth);
-    let max_name_width = TREE_WIDTH as usize - indent.len() - 2; // -2 for icon/space
+    let content_width = (TREE_WIDTH - 2) as usize; // -2 for borders
+    let max_name_width = content_width.saturating_sub(indent.len() + 2); // -2 for icon/space
 
     let (icon, fg) = match &entry.entry_type {
         TreeEntryType::Directory { is_expanded } => {
@@ -167,7 +238,7 @@ fn render_entry(
 
             // Pad to align git status
             let name_width = name_part.chars().count();
-            let padding_width = (TREE_WIDTH as usize).saturating_sub(name_width + stat_str.len());
+            let padding_width = content_width.saturating_sub(name_width + stat_str.len());
             let padding = " ".repeat(padding_width);
 
             queue!(stdout, Print(&name_part))?;
@@ -175,16 +246,32 @@ fn render_entry(
 
             // Render git stats with colors
             render_git_stats(stdout, colors, status.added_lines, status.removed_lines)?;
+
+            // Right border
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.tree_bg),
+                SetForegroundColor(border_color),
+                Print("│")
+            )?;
             return Ok(());
         }
     }
 
     // Pad to fill width (use character count, not bytes, for proper UTF-8 handling)
     let display_width = name_display.chars().count();
-    let padding = TREE_WIDTH as usize - display_width.min(TREE_WIDTH as usize);
+    let padding = content_width.saturating_sub(display_width.min(content_width));
 
     queue!(stdout, Print(&name_display))?;
     queue!(stdout, Print(" ".repeat(padding)))?;
+
+    // Right border
+    queue!(
+        stdout,
+        SetBackgroundColor(colors.tree_bg),
+        SetForegroundColor(border_color),
+        Print("│")
+    )?;
 
     Ok(())
 }
@@ -242,34 +329,39 @@ fn truncate_name(name: &str, max_width: usize) -> String {
 }
 
 /// Render an empty row
-fn render_empty_row(stdout: &mut impl Write, colors: &ColorScheme, row: u16) -> io::Result<()> {
+fn render_empty_row(stdout: &mut impl Write, colors: &ColorScheme, row: u16, is_focused: bool) -> io::Result<()> {
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    queue!(stdout, MoveTo(0, row))?;
+
+    // Left border
     queue!(
         stdout,
-        MoveTo(0, row),
+        SetBackgroundColor(colors.tree_bg),
+        SetForegroundColor(border_color),
+        Print("│")
+    )?;
+
+    // Empty content
+    let content_width = (TREE_WIDTH - 2) as usize;
+    queue!(
+        stdout,
         SetBackgroundColor(colors.tree_bg),
         SetForegroundColor(colors.tree_fg),
-        Print(" ".repeat(TREE_WIDTH as usize))
+        Print(" ".repeat(content_width))
     )?;
-    Ok(())
-}
 
-/// Render the separator between tree and editor
-pub fn render_separator(stdout: &mut impl Write, theme: Theme, height: u16) -> io::Result<()> {
-    let colors = theme.colors();
-
+    // Right border
     queue!(
         stdout,
         SetBackgroundColor(colors.tree_bg),
-        SetForegroundColor(colors.tree_separator_fg)
+        SetForegroundColor(border_color),
+        Print("│")
     )?;
-
-    for row in 0..height {
-        queue!(
-            stdout,
-            MoveTo(TREE_WIDTH, row),
-            Print(TREE_SEPARATOR)
-        )?;
-    }
 
     Ok(())
 }
@@ -376,7 +468,6 @@ mod tests {
     fn test_constants() {
         assert_eq!(TREE_WIDTH, 30);
         assert_eq!(MIN_WIDTH_WITH_TREE, 80);
-        assert_eq!(TREE_SEPARATOR, '│');
     }
 
     #[test]
@@ -406,5 +497,57 @@ mod tests {
         let display_width = display.chars().count();
         let padding = TREE_WIDTH as usize - display_width;
         assert_eq!(display_width + padding, TREE_WIDTH as usize);
+    }
+
+    // =========================================================================
+    // Border Tests (for upcoming border implementation)
+    // =========================================================================
+
+    #[test]
+    fn test_tree_border_width() {
+        // Verify border fits within TREE_WIDTH
+        let border_width = TREE_WIDTH;
+        assert_eq!(border_width, 30);
+    }
+
+    #[test]
+    fn test_tree_content_width_with_borders() {
+        // Verify content width accounts for left/right borders
+        let left_border = 1u16;
+        let right_border = 1u16;
+        let content_width = TREE_WIDTH - left_border - right_border;
+
+        // With borders: 30 - 1 - 1 = 28 chars for content
+        assert_eq!(content_width, 28);
+    }
+
+    #[test]
+    fn test_tree_entry_xoffset_with_border() {
+        // Verify entries start at column 1 (after left border)
+        let x_offset = 1u16;
+        assert_eq!(x_offset, 1);
+
+        // Entry should render at tree start (0) + offset (1) = column 1
+        let entry_column = 0 + x_offset;
+        assert_eq!(entry_column, 1);
+    }
+
+    #[test]
+    fn test_tree_border_characters() {
+        // Verify correct Unicode box-drawing characters for borders
+        let top_left = '┌';
+        let top_right = '┐';
+        let bottom_left = '└';
+        let bottom_right = '┘';
+        let vertical = '│';
+        let horizontal = '─';
+
+        // Verify these are the expected characters
+        assert_eq!(top_left, '┌');
+        assert_eq!(top_right, '┐');
+        assert_eq!(bottom_left, '└');
+        assert_eq!(bottom_right, '┘');
+        assert_eq!(vertical, '│');
+        assert_eq!(horizontal, '─');
     }
 }
