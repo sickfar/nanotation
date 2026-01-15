@@ -152,6 +152,9 @@ pub fn get_changed_files(root_path: &Path) -> Result<Vec<GitChangedFile>, GitErr
             .map_err(|_| GitError::NotARepo)?
     };
 
+    // Canonicalize to resolve symlinks (important on macOS where /var -> /private/var)
+    let abs_path = abs_path.canonicalize().map_err(|_| GitError::NotARepo)?;
+
     let repo = Repository::discover(&abs_path).map_err(|_| GitError::NotARepo)?;
     let workdir = repo.workdir().ok_or(GitError::NotARepo)?;
 

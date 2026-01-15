@@ -437,7 +437,8 @@ impl FileTreePanel {
     /// Check if a path is the current file
     pub fn is_current_file(&self, path: &Path) -> bool {
         self.current_file.as_ref().map_or(false, |current| {
-            current == path || current.canonicalize().ok().as_ref() == Some(&path.to_path_buf())
+            // Compare canonicalized paths (current is already canonicalized by set_current_file)
+            path.canonicalize().ok().as_ref() == Some(current)
         })
     }
 
