@@ -29,6 +29,20 @@ pub struct ColorScheme {
     // Diff indicator in status bar
     pub diff_indicator_bg: Color,
     pub diff_indicator_fg: Color,
+    // File tree colors
+    pub tree_bg: Color,
+    pub tree_fg: Color,
+    pub tree_folder_fg: Color,
+    pub tree_selected_bg: Color,
+    pub tree_selected_fg: Color,
+    pub tree_current_file_bg: Color,
+    pub tree_git_added_fg: Color,
+    pub tree_git_removed_fg: Color,
+    pub tree_separator_fg: Color,
+    pub tree_header_fg: Color,
+    pub tree_empty_fg: Color,
+    pub error_fg: Color,
+    pub error_bg: Color,
 }
 
 impl Theme {
@@ -97,6 +111,52 @@ impl Theme {
                     b: 50,
                 },
                 diff_indicator_fg: Color::Black,
+                // File tree colors
+                tree_bg: Color::Black,
+                tree_fg: Color::White,
+                tree_folder_fg: Color::Rgb {
+                    r: 100,
+                    g: 180,
+                    b: 255,
+                },
+                tree_selected_bg: Color::Rgb {
+                    r: 50,
+                    g: 50,
+                    b: 80,
+                },
+                tree_selected_fg: Color::White,
+                tree_current_file_bg: Color::Rgb {
+                    r: 40,
+                    g: 60,
+                    b: 40,
+                },
+                tree_git_added_fg: Color::Rgb {
+                    r: 100,
+                    g: 200,
+                    b: 100,
+                },
+                tree_git_removed_fg: Color::Rgb {
+                    r: 200,
+                    g: 100,
+                    b: 100,
+                },
+                tree_separator_fg: Color::Rgb {
+                    r: 80,
+                    g: 80,
+                    b: 80,
+                },
+                tree_header_fg: Color::Rgb {
+                    r: 180,
+                    g: 180,
+                    b: 100,
+                },
+                tree_empty_fg: Color::DarkGrey,
+                error_fg: Color::White,
+                error_bg: Color::Rgb {
+                    r: 150,
+                    g: 50,
+                    b: 50,
+                },
             },
             Theme::Light => ColorScheme {
                 bg: Color::White,
@@ -177,6 +237,52 @@ impl Theme {
                     b: 60,
                 },
                 diff_indicator_fg: Color::Black,
+                // File tree colors
+                tree_bg: Color::White,
+                tree_fg: Color::Black,
+                tree_folder_fg: Color::Rgb {
+                    r: 30,
+                    g: 100,
+                    b: 200,
+                },
+                tree_selected_bg: Color::Rgb {
+                    r: 200,
+                    g: 210,
+                    b: 230,
+                },
+                tree_selected_fg: Color::Black,
+                tree_current_file_bg: Color::Rgb {
+                    r: 210,
+                    g: 230,
+                    b: 210,
+                },
+                tree_git_added_fg: Color::Rgb {
+                    r: 50,
+                    g: 150,
+                    b: 50,
+                },
+                tree_git_removed_fg: Color::Rgb {
+                    r: 180,
+                    g: 50,
+                    b: 50,
+                },
+                tree_separator_fg: Color::Rgb {
+                    r: 180,
+                    g: 180,
+                    b: 180,
+                },
+                tree_header_fg: Color::Rgb {
+                    r: 120,
+                    g: 120,
+                    b: 50,
+                },
+                tree_empty_fg: Color::Grey,
+                error_fg: Color::White,
+                error_bg: Color::Rgb {
+                    r: 200,
+                    g: 80,
+                    b: 80,
+                },
             },
         }
     }
@@ -248,5 +354,34 @@ mod tests {
         // Cursor colors should also differ from regular selection
         assert_ne!(colors.diff_added_selected_bg, colors.selected_bg);
         assert_ne!(colors.diff_removed_selected_bg, colors.selected_bg);
+    }
+
+    #[test]
+    fn test_dark_theme_tree_colors() {
+        let colors = Theme::Dark.colors();
+        // Tree colors should be different from each other
+        assert_ne!(colors.tree_folder_fg, colors.tree_fg);
+        assert_ne!(colors.tree_selected_bg, colors.tree_bg);
+        assert_ne!(colors.tree_current_file_bg, colors.tree_bg);
+        assert_ne!(colors.tree_git_added_fg, colors.tree_git_removed_fg);
+    }
+
+    #[test]
+    fn test_light_theme_tree_colors() {
+        let colors = Theme::Light.colors();
+        // Tree colors should be different from each other
+        assert_ne!(colors.tree_folder_fg, colors.tree_fg);
+        assert_ne!(colors.tree_selected_bg, colors.tree_bg);
+        assert_ne!(colors.tree_current_file_bg, colors.tree_bg);
+        assert_ne!(colors.tree_git_added_fg, colors.tree_git_removed_fg);
+    }
+
+    #[test]
+    fn test_error_colors_distinct() {
+        let dark = Theme::Dark.colors();
+        let light = Theme::Light.colors();
+        // Error colors should be visible on their respective backgrounds
+        assert_ne!(dark.error_bg, dark.bg);
+        assert_ne!(light.error_bg, light.bg);
     }
 }

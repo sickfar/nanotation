@@ -1,8 +1,11 @@
+use crate::editor::EditorContent;
+use crate::file_tree::FileTreePanel;
 use crate::highlighting::{to_crossterm_color, SyntaxHighlighter};
-use crate::models::{EditorState, Line, ViewMode};
+use crate::models::{EditorState, FocusedPanel, Line, ViewMode};
 use crate::text::{wrap_styled_text, wrap_text};
 use crate::theme::{ColorScheme, Theme};
 use crate::ui_diff::render_diff_mode;
+use crate::ui_tree::{self, render_file_tree, render_separator, render_error_message};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     queue,
@@ -33,35 +36,135 @@ pub fn render(
     status_message: Option<&str>,
     lang_comment: &str,
     diff_available: bool,
+    file_tree: Option<&FileTreePanel>,
+    focused_panel: FocusedPanel,
+    editor_content: &EditorContent,
 ) -> io::Result<()> {
-    // Check if we're in diff view mode
+    // Check if we're in diff view mode (only when no file tree or tree is not focused)
     if let ViewMode::Diff { diff_result } = view_mode {
-        return render_diff_mode(
-            lines,
-            cursor_line,
-            scroll_offset,
-            diff_result,
-            editor_state,
-            file_path,
-            modified,
-            theme,
-            annotation_scroll,
-            highlighter,
-            status_message,
-            lang_comment,
-            diff_available,
-        );
+        if file_tree.is_none() {
+            return render_diff_mode(
+                lines,
+                cursor_line,
+                scroll_offset,
+                diff_result,
+                editor_state,
+                file_path,
+                modified,
+                theme,
+                annotation_scroll,
+                highlighter,
+                status_message,
+                lang_comment,
+                diff_available,
+            );
+        }
     }
+
     let (width, height) = terminal::size()?;
     // Reserve 5 lines at bottom: 4 for annotation area (border + 2 text lines + border) + 1 for status bar
     let content_height = (height - 5) as usize;
     let colors = theme.colors();
 
     let mut stdout = io::stdout();
-    queue!(stdout, MoveTo(0, 0))?;
+
+    // Calculate layout based on whether file tree is present
+    let (editor_start_col, editor_width) = if file_tree.is_some() {
+        let tree_width = ui_tree::TREE_WIDTH;
+        let separator_width = 1;
+        let start = tree_width + separator_width;
+        let available = (width as usize).saturating_sub(start as usize);
+        (start, available as u16)
+    } else {
+        (0, width)
+    };
+
+    // Render file tree if present
+    if let Some(tree) = file_tree {
+        let is_tree_focused = focused_panel == FocusedPanel::FileTree;
+        render_file_tree(&mut stdout, tree, theme, height.saturating_sub(5), is_tree_focused)?;
+        render_separator(&mut stdout, theme, height.saturating_sub(5))?;
+    }
+
+    // Handle empty or error editor states
+    match editor_content {
+        EditorContent::Empty => {
+            // Render empty editor area
+            render_empty_editor(&mut stdout, &colors, editor_start_col, editor_width, height)?;
+            // Render status bar and annotation panel
+            render_annotation_panel(
+                &mut stdout,
+                editor_state,
+                &colors,
+                None,
+                annotation_scroll,
+                editor_start_col,
+                editor_width,
+                height,
+                lang_comment,
+            )?;
+            render_status_bar_simple(
+                &mut stdout,
+                editor_state,
+                &colors,
+                file_path,
+                modified,
+                0,
+                0,
+                diff_available,
+                status_message,
+                file_tree.is_some(),
+                focused_panel,
+                editor_start_col,
+                editor_width,
+                height,
+            )?;
+            stdout.flush()?;
+            return Ok(());
+        }
+        EditorContent::Error { message } => {
+            // Render error message in editor area
+            render_error_message(&mut stdout, message, theme, editor_start_col, editor_width, height)?;
+            // Render status bar and annotation panel
+            render_annotation_panel(
+                &mut stdout,
+                editor_state,
+                &colors,
+                None,
+                annotation_scroll,
+                editor_start_col,
+                editor_width,
+                height,
+                lang_comment,
+            )?;
+            render_status_bar_simple(
+                &mut stdout,
+                editor_state,
+                &colors,
+                file_path,
+                modified,
+                0,
+                0,
+                diff_available,
+                status_message,
+                file_tree.is_some(),
+                focused_panel,
+                editor_start_col,
+                editor_width,
+                height,
+            )?;
+            stdout.flush()?;
+            return Ok(());
+        }
+        EditorContent::Loaded => {
+            // Continue with normal rendering
+        }
+    }
+
+    queue!(stdout, MoveTo(editor_start_col, 0))?;
 
     let gutter_width = lines.len().to_string().len() + 2; // + padding
-    let content_width = (width as usize).saturating_sub(gutter_width);
+    let content_width = (editor_width as usize).saturating_sub(gutter_width);
 
     let mut screen_line = 0;
     let mut line_idx = scroll_offset;
@@ -124,10 +227,10 @@ pub fn render(
             } else {
                 format!("{:>width$} ", " ", width = gutter_width - 1)
             };
-            
+
             queue!(
                 stdout,
-                MoveTo(0, screen_line as u16),
+                MoveTo(editor_start_col, screen_line as u16),
                 SetBackgroundColor(colors.bg),
                 SetForegroundColor(colors.line_number_fg),
                 Print(line_num_str),
@@ -181,9 +284,9 @@ pub fn render(
     while screen_line < content_height {
         queue!(
             stdout,
-            MoveTo(0, screen_line as u16),
+            MoveTo(editor_start_col, screen_line as u16),
             SetBackgroundColor(colors.bg),
-            Print(format!("{:width$}", "", width = width as usize)),
+            Print(format!("{:width$}", "", width = editor_width as usize)),
             ResetColor
         )?;
         screen_line += 1;
@@ -199,12 +302,13 @@ pub fn render(
         editor_state,
         annotation_scroll,
         &colors,
-        width,
+        editor_start_col,
+        editor_width,
         annotation_start,
     )?;
 
     // Render status bar
-    render_status_bar(
+    render_status_bar_new(
         &mut stdout,
         view_mode,
         editor_state,
@@ -215,10 +319,13 @@ pub fn render(
         search_matches,
         current_match,
         &colors,
-        width,
+        editor_start_col,
+        editor_width,
         height,
         status_message,
         diff_available,
+        file_tree.is_some(),
+        focused_panel,
     )?;
 
     // Show help overlay if in ShowingHelp state
@@ -234,7 +341,8 @@ pub fn render(
             *cursor_pos,
             annotation_scroll,
             annotation_start,
-            width,
+            editor_start_col,
+            editor_width,
         )?;
     } else {
         queue!(stdout, Hide)?;
@@ -251,13 +359,14 @@ fn render_annotation_area(
     editor_state: &EditorState,
     annotation_scroll: usize,
     colors: &ColorScheme,
+    start_col: u16,
     width: u16,
     annotation_start: u16,
 ) -> io::Result<()> {
     // Top border of annotation area
     queue!(
         stdout,
-        MoveTo(0, annotation_start),
+        MoveTo(start_col, annotation_start),
         SetBackgroundColor(colors.annotation_window_bg),
         SetForegroundColor(colors.annotation_window_fg),
         Print(format!("╔{}╗", "═".repeat(width as usize - 2))),
@@ -274,10 +383,14 @@ fn render_annotation_area(
             }
         }
         _ => {
-            if let Some(ref annotation) = lines[cursor_line].annotation {
-                annotation.clone()
+            if cursor_line < lines.len() {
+                if let Some(ref annotation) = lines[cursor_line].annotation {
+                    annotation.clone()
+                } else {
+                    "[No annotation - Press Enter to add]".to_string()
+                }
             } else {
-                "[No annotation - Press Enter to add]".to_string()
+                "[No annotation]".to_string()
             }
         }
     };
@@ -296,13 +409,13 @@ fn render_annotation_area(
         };
 
         let y_pos = annotation_start + 1 + i as u16;
-        
+
         // Calculate manual padding for proper wide character handling
         use crate::text::calculate_padding;
         let padding = calculate_padding(&display_line, max_annotation_width);
         queue!(
             stdout,
-            MoveTo(0, y_pos),
+            MoveTo(start_col, y_pos),
             SetBackgroundColor(colors.annotation_window_bg),
             SetForegroundColor(colors.annotation_window_fg),
             Print(format!("║ {}{}║", display_line, " ".repeat(padding))),
@@ -313,7 +426,7 @@ fn render_annotation_area(
     // Bottom border of annotation area
     queue!(
         stdout,
-        MoveTo(0, annotation_start + 3),
+        MoveTo(start_col, annotation_start + 3),
         SetBackgroundColor(colors.annotation_window_bg),
         SetForegroundColor(colors.annotation_window_fg),
         Print(format!("╚{}╝", "═".repeat(width as usize - 2))),
@@ -324,6 +437,7 @@ fn render_annotation_area(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn render_status_bar(
     stdout: &mut impl Write,
     view_mode: &ViewMode,
@@ -466,36 +580,374 @@ fn render_status_bar(
     Ok(())
 }
 
+/// New status bar render function with tree awareness
+#[allow(clippy::too_many_arguments)]
+fn render_status_bar_new(
+    stdout: &mut impl Write,
+    view_mode: &ViewMode,
+    editor_state: &EditorState,
+    file_path: &Option<String>,
+    modified: bool,
+    cursor_line: usize,
+    total_lines: usize,
+    search_matches: &[usize],
+    current_match: Option<usize>,
+    colors: &ColorScheme,
+    start_col: u16,
+    width: u16,
+    height: u16,
+    status_message: Option<&str>,
+    diff_available: bool,
+    has_tree: bool,
+    focused_panel: FocusedPanel,
+) -> io::Result<()> {
+    queue!(stdout, MoveTo(start_col, height - 1))?;
+
+    // If there's a status message, show it simply
+    if let Some(msg) = status_message {
+        queue!(
+            stdout,
+            SetBackgroundColor(colors.status_bg),
+            SetForegroundColor(colors.status_fg),
+            Print(format!(" {:width$}", msg, width = width as usize - 2)),
+            ResetColor
+        )?;
+        return Ok(());
+    }
+
+    // Status bar content depends on editor_state
+    match editor_state {
+        EditorState::Idle => {
+            // Extract just the filename from path
+            let filename = file_path
+                .as_deref()
+                .map(|p| Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(p))
+                .unwrap_or("[No File]");
+            let modified_flag = if modified { " [Modified]" } else { "" };
+            let view_indicator = if matches!(view_mode, ViewMode::Diff { .. }) {
+                "DIFF | "
+            } else {
+                ""
+            };
+
+            // Build the left part: filename and line info
+            let line_info = if total_lines > 0 {
+                format!(" | Line {}/{}", cursor_line + 1, total_lines)
+            } else {
+                String::new()
+            };
+
+            let left_part = format!(
+                " {}{}{}{}",
+                view_indicator, filename, modified_flag, line_info
+            );
+
+            // Render left part with normal status colors
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(&left_part),
+            )?;
+
+            // If diff is available, show the orange indicator with a space before it
+            if diff_available && !has_tree {
+                let diff_indicator = " ^D Diff ";
+                queue!(
+                    stdout,
+                    SetBackgroundColor(colors.status_bg),
+                    Print(" "),
+                    SetBackgroundColor(colors.diff_indicator_bg),
+                    SetForegroundColor(colors.diff_indicator_fg),
+                    Print(diff_indicator),
+                )?;
+            }
+
+            // Shortcuts depend on focus and tree presence
+            let shortcuts = if has_tree {
+                match focused_panel {
+                    FocusedPanel::FileTree => " Tab Editor  ^G Git/Tree  F1 Help  ^X Exit",
+                    FocusedPanel::Editor => " Tab Tree  ^G Git/Tree  F1 Help  ^O Save  ^X Exit",
+                }
+            } else {
+                " F1 Help  ^X Exit  ^O Save  ^W Search  ^T Theme"
+            };
+
+            let current_len = left_part.len() + if diff_available && !has_tree { 10 } else { 0 };
+            let remaining_width = (width as usize).saturating_sub(current_len + 1);
+            use crate::text::truncate_to_width;
+            let shortcuts_truncated = truncate_to_width(shortcuts, remaining_width);
+
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(&shortcuts_truncated),
+            )?;
+
+            // Fill remaining space
+            let total_len = current_len + shortcuts_truncated.len();
+            let padding = (width as usize).saturating_sub(total_len);
+            if padding > 0 {
+                queue!(stdout, Print(format!("{:width$}", "", width = padding)))?;
+            }
+            queue!(stdout, ResetColor)?;
+        }
+        EditorState::Annotating { .. } => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Enter: Save  Esc: Cancel  ←→: Move cursor  ↑↓: Navigate lines", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+        EditorState::Searching { query, .. } => {
+            let matches = if !search_matches.is_empty() {
+                format!(" ({}/{})", current_match.map(|i| i + 1).unwrap_or(0), search_matches.len())
+            } else {
+                String::new()
+            };
+            let search_status = format!("Search: {}█{}  Enter: Next  Esc: Cancel", query, matches);
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", search_status, width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+        EditorState::QuitPrompt => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Unsaved changes! Save before exiting? (y/n/Esc)", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+        EditorState::ShowingHelp => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Help Mode - Press any key to return", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Render empty editor area
+fn render_empty_editor(
+    stdout: &mut impl Write,
+    colors: &ColorScheme,
+    start_col: u16,
+    width: u16,
+    height: u16,
+) -> io::Result<()> {
+    let content_height = height.saturating_sub(5) as usize;
+
+    for row in 0..content_height {
+        queue!(
+            stdout,
+            MoveTo(start_col, row as u16),
+            SetBackgroundColor(colors.bg),
+            Print(" ".repeat(width as usize)),
+        )?;
+    }
+
+    queue!(stdout, ResetColor)?;
+    Ok(())
+}
+
+/// Render annotation panel (used when no file loaded)
+#[allow(clippy::too_many_arguments)]
+fn render_annotation_panel(
+    stdout: &mut impl Write,
+    editor_state: &EditorState,
+    colors: &ColorScheme,
+    annotation: Option<&str>,
+    annotation_scroll: usize,
+    start_col: u16,
+    width: u16,
+    height: u16,
+    _lang_comment: &str,
+) -> io::Result<()> {
+    let annotation_start = height - 5;
+
+    // Top border
+    queue!(
+        stdout,
+        MoveTo(start_col, annotation_start),
+        SetBackgroundColor(colors.annotation_window_bg),
+        SetForegroundColor(colors.annotation_window_fg),
+        Print(format!("╔{}╗", "═".repeat(width as usize - 2))),
+        ResetColor
+    )?;
+
+    // Get annotation text
+    let annotation_text = match editor_state {
+        EditorState::Annotating { buffer, .. } => {
+            if buffer.is_empty() {
+                "[Type annotation here...]".to_string()
+            } else {
+                buffer.clone()
+            }
+        }
+        _ => annotation.unwrap_or("[Select a file from the tree]").to_string(),
+    };
+
+    let max_width = width as usize - 4;
+    let wrapped = wrap_text(&annotation_text, max_width);
+
+    for i in 0..2 {
+        let line_idx = annotation_scroll + i;
+        let display_line = if line_idx < wrapped.len() {
+            wrapped[line_idx].clone()
+        } else {
+            String::new()
+        };
+
+        let y_pos = annotation_start + 1 + i as u16;
+        use crate::text::calculate_padding;
+        let padding = calculate_padding(&display_line, max_width);
+
+        queue!(
+            stdout,
+            MoveTo(start_col, y_pos),
+            SetBackgroundColor(colors.annotation_window_bg),
+            SetForegroundColor(colors.annotation_window_fg),
+            Print(format!("║ {}{}║", display_line, " ".repeat(padding))),
+            ResetColor
+        )?;
+    }
+
+    // Bottom border
+    queue!(
+        stdout,
+        MoveTo(start_col, annotation_start + 3),
+        SetBackgroundColor(colors.annotation_window_bg),
+        SetForegroundColor(colors.annotation_window_fg),
+        Print(format!("╚{}╝", "═".repeat(width as usize - 2))),
+        ResetColor
+    )?;
+
+    Ok(())
+}
+
+/// Simple status bar for empty/error states
+#[allow(clippy::too_many_arguments)]
+fn render_status_bar_simple(
+    stdout: &mut impl Write,
+    _editor_state: &EditorState,
+    colors: &ColorScheme,
+    file_path: &Option<String>,
+    modified: bool,
+    cursor_line: usize,
+    total_lines: usize,
+    _diff_available: bool,
+    status_message: Option<&str>,
+    has_tree: bool,
+    focused_panel: FocusedPanel,
+    start_col: u16,
+    width: u16,
+    height: u16,
+) -> io::Result<()> {
+    queue!(stdout, MoveTo(start_col, height - 1))?;
+
+    if let Some(msg) = status_message {
+        queue!(
+            stdout,
+            SetBackgroundColor(colors.status_bg),
+            SetForegroundColor(colors.status_fg),
+            Print(format!(" {:width$}", msg, width = width as usize - 2)),
+            ResetColor
+        )?;
+        return Ok(());
+    }
+
+    let filename = file_path
+        .as_deref()
+        .map(|p| Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(p))
+        .unwrap_or("[No File]");
+
+    let modified_flag = if modified { " [Modified]" } else { "" };
+
+    let line_info = if total_lines > 0 {
+        format!(" | Line {}/{}", cursor_line + 1, total_lines)
+    } else {
+        String::new()
+    };
+
+    let left_part = format!(" {}{}{}", filename, modified_flag, line_info);
+
+    queue!(
+        stdout,
+        SetBackgroundColor(colors.status_bg),
+        SetForegroundColor(colors.status_fg),
+        Print(&left_part),
+    )?;
+
+    let shortcuts = if has_tree {
+        match focused_panel {
+            FocusedPanel::FileTree => " Tab Editor  ^G Git/Tree  F1 Help  ^X Exit",
+            FocusedPanel::Editor => " Tab Tree  F1 Help  ^O Save  ^X Exit",
+        }
+    } else {
+        " F1 Help  ^X Exit  ^O Save"
+    };
+
+    let current_len = left_part.len();
+    let remaining = (width as usize).saturating_sub(current_len + 1);
+    use crate::text::truncate_to_width;
+    let truncated = truncate_to_width(shortcuts, remaining);
+
+    queue!(stdout, Print(&truncated))?;
+
+    let total_len = current_len + truncated.len();
+    let padding = (width as usize).saturating_sub(total_len);
+    if padding > 0 {
+        queue!(stdout, Print(" ".repeat(padding)))?;
+    }
+
+    queue!(stdout, ResetColor)?;
+    Ok(())
+}
+
 fn position_cursor(
     stdout: &mut impl Write,
     buffer: &str,
     cursor_pos: usize,
     annotation_scroll: usize,
     annotation_start: u16,
+    start_col: u16,
     width: u16,
 ) -> io::Result<()> {
     let max_annotation_width = width as usize - 4;
     let wrapped_annotation = wrap_text(buffer, max_annotation_width);
-    
+
     // Calculate cursor position in wrapped text
     let (cursor_line, cursor_col) = if !buffer.is_empty() {
         let chars: Vec<char> = buffer.chars().collect();
         let actual_pos = cursor_pos.min(chars.len());
-        
+
         let mut chars_so_far = 0;
         let mut found_line = 0;
         let mut found_col = 0;
-        
+
         for (line_idx, wrapped_line) in wrapped_annotation.iter().enumerate() {
             let wrapped_chars = wrapped_line.chars().count();
             let next_chars = chars_so_far + wrapped_chars;
-            
+
             if actual_pos <= next_chars {
                 found_line = line_idx;
                 found_col = actual_pos - chars_so_far;
                 break;
             }
-            
+
             chars_so_far = next_chars;
             if line_idx < wrapped_annotation.len() - 1 && next_chars < chars.len() {
                 chars_so_far += 1;
@@ -506,13 +958,13 @@ fn position_cursor(
         (0, 0)
     };
 
-    let cursor_screen_line = if cursor_line >= annotation_scroll && 
+    let cursor_screen_line = if cursor_line >= annotation_scroll &&
                                cursor_line < annotation_scroll + 2 {
         annotation_start + 1 + (cursor_line - annotation_scroll) as u16
     } else {
         annotation_start + 1
     };
-    
+
     let display_line = if cursor_line < wrapped_annotation.len() {
         &wrapped_annotation[cursor_line]
     } else {
@@ -522,11 +974,11 @@ fn position_cursor(
     // Convert character index to visual column for proper cursor positioning with wide chars
     use crate::text::char_index_to_visual_col;
     let cursor_visual_col = char_index_to_visual_col(display_line, cursor_col);
-    let cursor_x = 2 + cursor_visual_col;
-    
+    let cursor_x = start_col + 2 + cursor_visual_col as u16;
+
     queue!(
         stdout,
-        MoveTo(cursor_x as u16, cursor_screen_line),
+        MoveTo(cursor_x, cursor_screen_line),
         Show
     )?;
 

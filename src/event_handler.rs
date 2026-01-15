@@ -1,5 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 use crate::diff::adjust_diff_scroll;
+use crate::file_tree::FileTreePanel;
 use crate::models::{Action, Line, ViewMode};
 use crate::navigation::{
     adjust_annotation_scroll_pure, adjust_normal_scroll, find_matches, find_next_annotation,
@@ -11,6 +12,7 @@ use crossterm::{
     terminal,
 };
 use std::io;
+use std::path::PathBuf;
 
 // ============================================================================
 // Multi-Hotkey Helper for Keyboard Layout Independence
@@ -77,6 +79,101 @@ pub enum IdleModeResult {
     ToggleDiffView,
     /// Exit diff view (only valid when in diff view mode)
     ExitDiffView,
+}
+
+// ============================================================================
+// Tree Panel Input Handling
+// ============================================================================
+
+/// Result of handling key events in tree panel.
+pub enum TreeInputResult {
+    /// Continue in current state
+    Continue,
+    /// Open a file (switch focus to editor)
+    OpenFile(PathBuf),
+    /// Tree needs refresh (file deleted, etc.)
+    RefreshNeeded,
+}
+
+/// Handle key events when file tree is focused.
+pub fn handle_tree_input(
+    key: KeyEvent,
+    tree: &mut FileTreePanel,
+    terminal_height: u16,
+) -> io::Result<TreeInputResult> {
+    let page_size = terminal_height.saturating_sub(8) as usize;
+
+    match key.code {
+        // Navigation
+        KeyCode::Up => {
+            tree.navigate_up();
+            Ok(TreeInputResult::Continue)
+        }
+        KeyCode::Down => {
+            tree.navigate_down();
+            Ok(TreeInputResult::Continue)
+        }
+        KeyCode::Home => {
+            tree.navigate_home();
+            Ok(TreeInputResult::Continue)
+        }
+        KeyCode::End => {
+            tree.navigate_end();
+            Ok(TreeInputResult::Continue)
+        }
+        KeyCode::PageUp => {
+            tree.page_up(page_size);
+            Ok(TreeInputResult::Continue)
+        }
+        KeyCode::PageDown => {
+            tree.page_down(page_size);
+            Ok(TreeInputResult::Continue)
+        }
+
+        // Expand/Collapse with arrow keys
+        KeyCode::Right => {
+            if let Err(e) = tree.expand_selected() {
+                // Log error but continue
+                eprintln!("Error expanding: {}", e);
+            }
+            Ok(TreeInputResult::Continue)
+        }
+        KeyCode::Left => {
+            if let Err(e) = tree.collapse_selected() {
+                // Log error but continue
+                eprintln!("Error collapsing: {}", e);
+            }
+            Ok(TreeInputResult::Continue)
+        }
+
+        // Enter - open file or toggle folder
+        KeyCode::Enter => {
+            if let Some(entry) = tree.get_selected() {
+                if entry.is_directory() {
+                    // Toggle expand/collapse
+                    if entry.is_expanded() {
+                        let _ = tree.collapse_selected();
+                    } else {
+                        let _ = tree.expand_selected();
+                    }
+                    Ok(TreeInputResult::Continue)
+                } else if entry.is_selectable() {
+                    // Check if file still exists
+                    if !entry.path.exists() {
+                        return Ok(TreeInputResult::RefreshNeeded);
+                    }
+                    // Open the file
+                    Ok(TreeInputResult::OpenFile(entry.path.clone()))
+                } else {
+                    Ok(TreeInputResult::Continue)
+                }
+            } else {
+                Ok(TreeInputResult::Continue)
+            }
+        }
+
+        _ => Ok(TreeInputResult::Continue),
+    }
 }
 
 /// Handles key events in Idle state.
