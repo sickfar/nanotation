@@ -32,17 +32,19 @@ pub fn render_diff_mode(
     status_message: Option<&str>,
     _lang_comment: &str,
     diff_available: bool,
+    start_col: u16,
+    available_width: u16,
 ) -> io::Result<()> {
-    let (width, height) = terminal::size()?;
+    let (terminal_width, height) = terminal::size()?;
     let content_height = (height.saturating_sub(5)) as usize;
     let colors = theme.colors();
 
     let mut stdout = io::stdout();
-    queue!(stdout, MoveTo(0, 0))?;
+    queue!(stdout, MoveTo(start_col, 0))?;
 
-    // Calculate pane widths
+    // Calculate pane widths (use available_width, not terminal width)
     let separator_width = 1;
-    let total_content_width = width as usize - separator_width;
+    let total_content_width = (available_width as usize).saturating_sub(separator_width);
     let left_pane_width = total_content_width / 2;
     let right_pane_width = total_content_width - left_pane_width;
 
@@ -90,7 +92,7 @@ pub fn render_diff_mode(
         render_diff_pane_line(
             &mut stdout,
             &diff_line.working,
-            0,
+            start_col,
             left_gutter_width,
             left_content_width,
             is_cursor_line,
@@ -105,7 +107,7 @@ pub fn render_diff_mode(
         // Render separator
         queue!(
             stdout,
-            MoveTo(left_pane_width as u16, screen_line as u16),
+            MoveTo(start_col + left_pane_width as u16, screen_line as u16),
             SetBackgroundColor(colors.status_bg),
             SetForegroundColor(colors.status_fg),
             Print("│"),
@@ -116,7 +118,7 @@ pub fn render_diff_mode(
         render_diff_pane_line(
             &mut stdout,
             &diff_line.head,
-            (left_pane_width + separator_width) as u16,
+            start_col + (left_pane_width + separator_width) as u16,
             right_gutter_width,
             right_content_width,
             false, // cursor is only on left
@@ -137,7 +139,7 @@ pub fn render_diff_mode(
         // Left pane empty
         queue!(
             stdout,
-            MoveTo(0, screen_line as u16),
+            MoveTo(start_col, screen_line as u16),
             SetBackgroundColor(colors.bg),
             Print(format!("{:width$}", "", width = left_pane_width)),
         )?;
@@ -145,7 +147,7 @@ pub fn render_diff_mode(
         // Separator
         queue!(
             stdout,
-            MoveTo(left_pane_width as u16, screen_line as u16),
+            MoveTo(start_col + left_pane_width as u16, screen_line as u16),
             SetBackgroundColor(colors.status_bg),
             SetForegroundColor(colors.status_fg),
             Print("│"),
@@ -154,7 +156,7 @@ pub fn render_diff_mode(
         // Right pane empty
         queue!(
             stdout,
-            MoveTo((left_pane_width + separator_width) as u16, screen_line as u16),
+            MoveTo(start_col + (left_pane_width + separator_width) as u16, screen_line as u16),
             SetBackgroundColor(colors.bg),
             Print(format!("{:width$}", "", width = right_pane_width)),
             ResetColor
@@ -163,7 +165,7 @@ pub fn render_diff_mode(
         screen_line += 1;
     }
 
-    // Render annotation area
+    // Render annotation area (full terminal width, from column 0)
     let annotation_start = height - 5;
     render_diff_annotation_area(
         &mut stdout,
@@ -172,11 +174,11 @@ pub fn render_diff_mode(
         editor_state,
         annotation_scroll,
         &colors,
-        width,
+        terminal_width,
         annotation_start,
     )?;
 
-    // Render status bar
+    // Render status bar (full terminal width, from column 0)
     render_diff_status_bar(
         &mut stdout,
         editor_state,
@@ -185,7 +187,7 @@ pub fn render_diff_mode(
         cursor_line,
         lines.len(),
         &colors,
-        width,
+        terminal_width,
         height,
         status_message,
         diff_available,
@@ -193,7 +195,7 @@ pub fn render_diff_mode(
 
     // Render help overlay if showing help
     if matches!(editor_state, EditorState::ShowingHelp) {
-        render_diff_help_overlay(&mut stdout, &colors, width, height)?;
+        render_diff_help_overlay(&mut stdout, &colors, terminal_width, height)?;
     }
 
     // Position and show cursor if in annotation edit state
@@ -204,7 +206,7 @@ pub fn render_diff_mode(
             *cursor_pos,
             annotation_scroll,
             annotation_start,
-            width,
+            terminal_width,
         )?;
     } else {
         queue!(stdout, Hide)?;
@@ -657,6 +659,15 @@ fn render_diff_status_bar(
                 SetBackgroundColor(colors.status_bg),
                 SetForegroundColor(colors.status_fg),
                 Print(format!(" {:width$}", "Unsaved changes! Save before exiting? (y/n/Esc)", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+        EditorState::FileSwitchPrompt { .. } => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Unsaved changes! Save before switching? (y/n/Esc)", width = width as usize - 2)),
                 ResetColor
             )?;
         }

@@ -40,28 +40,46 @@ pub fn render(
     focused_panel: FocusedPanel,
     editor_content: &EditorContent,
 ) -> io::Result<()> {
-    // Check if we're in diff view mode (only when no file tree or tree is not focused)
+    let (width, height) = terminal::size()?;
+
+    // Check if we're in diff view mode
     if let ViewMode::Diff { diff_result } = view_mode {
-        if file_tree.is_none() {
-            return render_diff_mode(
-                lines,
-                cursor_line,
-                scroll_offset,
-                diff_result,
-                editor_state,
-                file_path,
-                modified,
-                theme,
-                annotation_scroll,
-                highlighter,
-                status_message,
-                lang_comment,
-                diff_available,
-            );
-        }
+        // Calculate layout for diff mode
+        let (start_col, available_width) = if let Some(tree) = file_tree {
+            // Render file tree first
+            let mut stdout = io::stdout();
+            let is_tree_focused = focused_panel == FocusedPanel::FileTree;
+            render_file_tree(&mut stdout, tree, theme, height.saturating_sub(5), is_tree_focused)?;
+            render_separator(&mut stdout, theme, height.saturating_sub(5))?;
+
+            let tree_width = ui_tree::TREE_WIDTH;
+            let separator_width = 1;
+            let start = tree_width + separator_width;
+            let available = (width as usize).saturating_sub(start as usize);
+            (start, available as u16)
+        } else {
+            (0, width)
+        };
+
+        return render_diff_mode(
+            lines,
+            cursor_line,
+            scroll_offset,
+            diff_result,
+            editor_state,
+            file_path,
+            modified,
+            theme,
+            annotation_scroll,
+            highlighter,
+            status_message,
+            lang_comment,
+            diff_available,
+            start_col,
+            available_width,
+        );
     }
 
-    let (width, height) = terminal::size()?;
     // Reserve 5 lines at bottom: 4 for annotation area (border + 2 text lines + border) + 1 for status bar
     let content_height = (height - 5) as usize;
     let colors = theme.colors();
@@ -581,6 +599,15 @@ fn render_status_bar_new(
                 SetBackgroundColor(colors.status_bg),
                 SetForegroundColor(colors.status_fg),
                 Print(format!(" {:width$}", "Unsaved changes! Save before exiting? (y/n/Esc)", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
+        EditorState::FileSwitchPrompt { .. } => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Unsaved changes! Save before switching? (y/n/Esc)", width = width as usize - 2)),
                 ResetColor
             )?;
         }

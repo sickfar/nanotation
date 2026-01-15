@@ -49,6 +49,8 @@ pub enum EditorState {
     ShowingHelp,
     /// Asking about unsaved changes before quit
     QuitPrompt,
+    /// Asking about unsaved changes before switching files
+    FileSwitchPrompt { pending_path: std::path::PathBuf },
 }
 
 impl Default for EditorState {

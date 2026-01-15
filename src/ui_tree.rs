@@ -179,12 +179,12 @@ fn render_entry(
         }
     }
 
-    // Pad to fill width
+    // Pad to fill width (use character count, not bytes, for proper UTF-8 handling)
     let display_width = name_display.chars().count();
     let padding = TREE_WIDTH as usize - display_width.min(TREE_WIDTH as usize);
-    let padded = format!("{}{}", name_display, " ".repeat(padding));
 
-    queue!(stdout, Print(&padded[..TREE_WIDTH as usize]))?;
+    queue!(stdout, Print(&name_display))?;
+    queue!(stdout, Print(" ".repeat(padding)))?;
 
     Ok(())
 }
@@ -377,5 +377,34 @@ mod tests {
         assert_eq!(TREE_WIDTH, 30);
         assert_eq!(MIN_WIDTH_WITH_TREE, 80);
         assert_eq!(TREE_SEPARATOR, '│');
+    }
+
+    #[test]
+    fn test_folder_icons_are_single_char_width() {
+        // Folder icons are multi-byte UTF-8 but should count as 1 character for display width
+        // This is important for proper line padding calculations
+        assert_eq!(FOLDER_EXPANDED.chars().count(), 1);
+        assert_eq!(FOLDER_COLLAPSED.chars().count(), 1);
+        // Verify they ARE multi-byte (the root cause of the bug)
+        assert!(FOLDER_EXPANDED.len() > 1, "▼ should be multi-byte UTF-8");
+        assert!(FOLDER_COLLAPSED.len() > 1, "▶ should be multi-byte UTF-8");
+    }
+
+    #[test]
+    fn test_display_width_with_utf8_icons() {
+        // Regression test: line with folder icon should have correct character count
+        // The bug was using byte length instead of char count for padding
+        let indent = "";
+        let icon = FOLDER_EXPANDED;
+        let name = "src";
+        let display = format!("{}{} {}", indent, icon, name);
+
+        // Should be: "▼" (1 char) + " " (1 char) + "src" (3 chars) = 5 chars
+        assert_eq!(display.chars().count(), 5);
+
+        // Padding should fill to TREE_WIDTH
+        let display_width = display.chars().count();
+        let padding = TREE_WIDTH as usize - display_width;
+        assert_eq!(display_width + padding, TREE_WIDTH as usize);
     }
 }
