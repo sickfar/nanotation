@@ -142,22 +142,6 @@ pub fn get_head_content(path: &str) -> Result<String, GitError> {
     Ok(content.to_string())
 }
 
-/// Find the git repository root for a given path
-#[allow(dead_code)]
-pub fn find_git_root(path: &Path) -> Option<std::path::PathBuf> {
-    let abs_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-
-    Repository::discover(&abs_path)
-        .ok()
-        .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
-}
-
 /// Get list of changed files in a git repository
 pub fn get_changed_files(root_path: &Path) -> Result<Vec<GitChangedFile>, GitError> {
     let abs_path = if root_path.is_absolute() {
@@ -299,25 +283,36 @@ mod tests {
     fn create_git_repo() -> TempDir {
         let dir = TempDir::new().unwrap();
 
-        // Initialize git repo
-        Command::new("git")
+        // Initialize git repo and verify success
+        let output = Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to init git repo");
+            .expect("Failed to run git init");
+        assert!(output.status.success(), "git init failed: {:?}", output);
 
         // Configure git user for commits
-        Command::new("git")
+        let output = Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to configure git email");
+            .expect("Failed to run git config email");
+        assert!(output.status.success(), "git config email failed: {:?}", output);
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to configure git name");
+            .expect("Failed to run git config name");
+        assert!(output.status.success(), "git config name failed: {:?}", output);
+
+        // Disable commit signing for tests (avoid issues with signing hooks)
+        let output = Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to run git config gpgsign");
+        assert!(output.status.success(), "git config gpgsign failed: {:?}", output);
 
         dir
     }
@@ -326,17 +321,27 @@ mod tests {
         let file_path = dir.path().join(filename);
         fs::write(&file_path, content).unwrap();
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["add", filename])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to add file");
+            .expect("Failed to run git add");
+        assert!(output.status.success(), "git add failed: {:?}", output);
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["commit", "-m", "Add file"])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to commit");
+            .expect("Failed to run git commit");
+        assert!(output.status.success(), "git commit failed: {:?}", output);
+
+        // Verify the commit exists by checking HEAD
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to run git rev-parse");
+        assert!(output.status.success(), "git rev-parse HEAD failed - commit not created: {:?}", output);
     }
 
     #[test]
@@ -427,26 +432,6 @@ mod tests {
 
         let result = get_head_content(file_path.to_str().unwrap());
         assert!(matches!(result, Err(GitError::NotARepo)));
-    }
-
-    #[test]
-    fn test_find_git_root() {
-        let dir = create_git_repo();
-        let subdir = dir.path().join("subdir");
-        fs::create_dir(&subdir).unwrap();
-
-        let root = find_git_root(&subdir);
-        assert!(root.is_some());
-        // The root should be the repo directory (canonicalized)
-        let expected = dir.path().canonicalize().unwrap();
-        assert_eq!(root.unwrap(), expected);
-    }
-
-    #[test]
-    fn test_find_git_root_no_repo() {
-        let dir = TempDir::new().unwrap();
-        let root = find_git_root(dir.path());
-        assert!(root.is_none());
     }
 
     #[test]

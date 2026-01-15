@@ -419,7 +419,6 @@ impl FileTreePanel {
     }
 
     /// Get the path of the currently selected file (not directory)
-    #[allow(dead_code)]
     pub fn get_selected_file_path(&self) -> Option<&Path> {
         self.get_selected().and_then(|entry| {
             if matches!(entry.entry_type, TreeEntryType::File { .. }) && entry.is_selectable() {

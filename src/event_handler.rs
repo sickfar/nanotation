@@ -157,13 +157,13 @@ pub fn handle_tree_input(
                         let _ = tree.expand_selected();
                     }
                     Ok(TreeInputResult::Continue)
-                } else if entry.is_selectable() {
+                } else if let Some(path) = tree.get_selected_file_path() {
                     // Check if file still exists
-                    if !entry.path.exists() {
+                    if !path.exists() {
                         return Ok(TreeInputResult::RefreshNeeded);
                     }
                     // Open the file
-                    Ok(TreeInputResult::OpenFile(entry.path.clone()))
+                    Ok(TreeInputResult::OpenFile(path.to_path_buf()))
                 } else {
                     Ok(TreeInputResult::Continue)
                 }
@@ -1896,5 +1896,605 @@ mod tests {
         // Both should return ShowHelp
         assert!(matches!(result_normal, IdleModeResult::ShowHelp));
         assert!(matches!(result_diff, IdleModeResult::ShowHelp));
+    }
+
+    // ========================================================================
+    // Tree Input Handler Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tree_input_navigate_up() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file_a.txt")).unwrap();
+        File::create(dir.path().join("file_b.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.selected_index = 1; // Start on second file
+
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        assert_eq!(panel.selected_index, 0);
+    }
+
+    #[test]
+    fn test_tree_input_navigate_down() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file_a.txt")).unwrap();
+        File::create(dir.path().join("file_b.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.selected_index = 0;
+
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        assert_eq!(panel.selected_index, 1);
+    }
+
+    #[test]
+    fn test_tree_input_navigate_home() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        for i in 0..5 {
+            File::create(dir.path().join(format!("file_{}.txt", i))).unwrap();
+        }
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.selected_index = 3;
+
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        assert_eq!(panel.selected_index, 0);
+    }
+
+    #[test]
+    fn test_tree_input_navigate_end() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        for i in 0..5 {
+            File::create(dir.path().join(format!("file_{}.txt", i))).unwrap();
+        }
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.selected_index = 0;
+
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        assert_eq!(panel.selected_index, panel.entries.len() - 1);
+    }
+
+    #[test]
+    fn test_tree_input_page_up() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        for i in 0..20 {
+            File::create(dir.path().join(format!("file_{:02}.txt", i))).unwrap();
+        }
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.selected_index = 15;
+
+        // Terminal height 30, page_size = 30 - 8 = 22
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        assert!(panel.selected_index < 15);
+    }
+
+    #[test]
+    fn test_tree_input_page_down() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        for i in 0..20 {
+            File::create(dir.path().join(format!("file_{:02}.txt", i))).unwrap();
+        }
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.selected_index = 5;
+
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        assert!(panel.selected_index > 5);
+    }
+
+    #[test]
+    fn test_tree_input_expand_directory() {
+        use tempfile::TempDir;
+        use std::fs::{self, File};
+
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+        File::create(dir.path().join("subdir/nested.txt")).unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Find the subdir entry and select it
+        let subdir_idx = panel.entries.iter()
+            .position(|e| e.name == "subdir")
+            .unwrap();
+        panel.selected_index = subdir_idx;
+
+        // Press Right to expand
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+
+        // After expanding, nested.txt should be visible
+        let has_nested = panel.entries.iter().any(|e| e.name == "nested.txt");
+        assert!(has_nested, "Nested file should be visible after expand");
+    }
+
+    #[test]
+    fn test_tree_input_collapse_directory() {
+        use tempfile::TempDir;
+        use std::fs::{self, File};
+
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+        File::create(dir.path().join("subdir/nested.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Find and expand subdir first
+        let subdir_idx = panel.entries.iter()
+            .position(|e| e.name == "subdir")
+            .unwrap();
+        panel.selected_index = subdir_idx;
+        panel.expand_selected().unwrap();
+
+        // Now collapse with Left key
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+
+        // After collapsing, nested.txt should not be visible
+        let has_nested = panel.entries.iter().any(|e| e.name == "nested.txt");
+        assert!(!has_nested, "Nested file should not be visible after collapse");
+    }
+
+    #[test]
+    fn test_tree_input_enter_opens_file() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Find the file entry
+        let file_idx = panel.entries.iter()
+            .position(|e| e.name == "file.txt")
+            .unwrap();
+        panel.selected_index = file_idx;
+
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::OpenFile(_)));
+        if let TreeInputResult::OpenFile(path) = result {
+            assert!(path.ends_with("file.txt"));
+        }
+    }
+
+    #[test]
+    fn test_tree_input_enter_toggles_directory() {
+        use tempfile::TempDir;
+        use std::fs::{self, File};
+
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+        File::create(dir.path().join("subdir/nested.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Find the subdir entry
+        let subdir_idx = panel.entries.iter()
+            .position(|e| e.name == "subdir")
+            .unwrap();
+        panel.selected_index = subdir_idx;
+
+        // Press Enter to expand
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        let has_nested = panel.entries.iter().any(|e| e.name == "nested.txt");
+        assert!(has_nested, "Should expand on Enter");
+
+        // Press Enter again to collapse
+        panel.selected_index = panel.entries.iter()
+            .position(|e| e.name == "subdir")
+            .unwrap();
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        let has_nested = panel.entries.iter().any(|e| e.name == "nested.txt");
+        assert!(!has_nested, "Should collapse on second Enter");
+    }
+
+    #[test]
+    fn test_tree_input_unhandled_key_continues() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+
+        // Press an unhandled key
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+    }
+
+    #[test]
+    fn test_tree_input_navigate_up_at_boundary() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        panel.selected_index = 0; // Already at top
+
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        assert_eq!(panel.selected_index, 0); // Should stay at 0
+    }
+
+    #[test]
+    fn test_tree_input_navigate_down_at_boundary() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+
+        let mut panel = FileTreePanel::new(dir.path().to_path_buf()).unwrap();
+        let last_idx = panel.entries.len() - 1;
+        panel.selected_index = last_idx;
+
+        let result = handle_tree_input(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut panel,
+            30,
+        ).unwrap();
+
+        assert!(matches!(result, TreeInputResult::Continue));
+        assert_eq!(panel.selected_index, last_idx); // Should stay at last
+    }
+
+    // ========================================================================
+    // Edge Cases for Cursor Positions
+    // ========================================================================
+
+    #[test]
+    fn test_cursor_position_after_delete_annotation() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: Some("test".to_string()) },
+            Line { content: "line2".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        // Delete annotation with Delete key
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &ViewMode::Normal,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::Action(_)));
+        assert_eq!(cursor_line, 0); // Cursor should stay on same line
+    }
+
+    #[test]
+    fn test_cursor_position_after_navigation() {
+        let mut lines = vec![
+            Line { content: "line1".to_string(), annotation: Some("a1".to_string()) },
+            Line { content: "line2".to_string(), annotation: None },
+            Line { content: "line3".to_string(), annotation: Some("a3".to_string()) },
+        ];
+        let mut cursor_line = 0;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        // Jump to next annotation (Ctrl+N)
+        handle_idle_mode(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut lines,
+            &mut cursor_line,
+            &ViewMode::Normal,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert_eq!(cursor_line, 2); // Should jump to line 3 (index 2)
+    }
+
+    #[test]
+    fn test_cursor_position_at_file_boundaries() {
+        let mut lines = vec![
+            Line { content: "only line".to_string(), annotation: None },
+        ];
+        let mut cursor_line = 0;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        // Try to move down when already at end
+        handle_idle_mode(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &ViewMode::Normal,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert_eq!(cursor_line, 0); // Should stay at 0
+
+        // Try to move up when already at start
+        handle_idle_mode(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &ViewMode::Normal,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert_eq!(cursor_line, 0); // Should stay at 0
+    }
+
+    #[test]
+    fn test_annotation_cursor_position_empty_buffer() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = String::new();
+        let mut cursor_pos = 0;
+        let mut annotation_scroll = 0;
+
+        // Try to delete from empty buffer
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(cursor_pos, 0);
+        assert_eq!(buffer, "");
+    }
+
+    #[test]
+    fn test_annotation_cursor_position_backspace_at_start() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "test".to_string();
+        let mut cursor_pos = 0; // Cursor at start
+        let mut annotation_scroll = 0;
+
+        // Backspace at start should do nothing
+        let result = handle_annotation_input(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+
+        assert!(matches!(result, AnnotationModeResult::Continue));
+        assert_eq!(buffer, "test"); // Buffer unchanged
+        assert_eq!(cursor_pos, 0); // Cursor stays at 0
+    }
+
+    #[test]
+    fn test_annotation_cursor_movement_home_end() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "hello world".to_string();
+        let mut cursor_pos = 5;
+        let mut annotation_scroll = 0;
+
+        // Press Home
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+        assert_eq!(cursor_pos, 0);
+
+        // Press End
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+        assert_eq!(cursor_pos, buffer.chars().count());
+    }
+
+    #[test]
+    fn test_annotation_cursor_left_right() {
+        let lines = vec![
+            Line { content: "line1".to_string(), annotation: None },
+        ];
+        let mut buffer = "test".to_string();
+        let mut cursor_pos = 2;
+        let mut annotation_scroll = 0;
+
+        // Press Left
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+        assert_eq!(cursor_pos, 1);
+
+        // Press Right
+        handle_annotation_input(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &mut buffer,
+            &mut cursor_pos,
+            &lines,
+            0,
+            &mut annotation_scroll,
+        ).unwrap();
+        assert_eq!(cursor_pos, 2);
+    }
+
+    #[test]
+    fn test_search_cursor_position_updates() {
+        let lines = vec![
+            Line { content: "first match here".to_string(), annotation: None },
+            Line { content: "no match".to_string(), annotation: None },
+            Line { content: "second match here".to_string(), annotation: None },
+        ];
+        let mut query = "match".to_string();
+        let mut cursor_pos = query.len();
+        let mut search_matches = vec![0, 2];
+        let mut current_match = Some(0);
+        let mut cursor_line = 0;
+        let mut scroll_offset = 0;
+        let view_mode = ViewMode::Normal;
+
+        // Press Enter to go to next match
+        handle_search_input(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut query,
+            &mut cursor_pos,
+            &mut search_matches,
+            &mut current_match,
+            &lines,
+            &mut cursor_line,
+            &mut scroll_offset,
+            &view_mode,
+        ).unwrap();
+
+        assert_eq!(current_match, Some(1));
+        assert_eq!(cursor_line, 2); // Should move to line 2
+    }
+
+    #[test]
+    fn test_empty_lines_cursor_behavior() {
+        let mut lines = vec![];
+        let mut cursor_line = 0;
+        let mut theme = crate::theme::Theme::Dark;
+        let mut annotation_scroll = 0;
+        let mut scroll_offset = 0;
+
+        // Navigate down in empty file
+        let result = handle_idle_mode(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut lines,
+            &mut cursor_line,
+            &ViewMode::Normal,
+            &mut theme,
+            &mut annotation_scroll,
+            &mut scroll_offset,
+        ).unwrap();
+
+        assert!(matches!(result, IdleModeResult::Continue));
+        // Cursor should remain valid (0)
+        assert_eq!(cursor_line, 0);
     }
 }
