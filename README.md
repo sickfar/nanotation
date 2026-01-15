@@ -21,6 +21,7 @@ nanot <file>
 **Key Features:**
 
 -   **Inline Annotations**: Safely add review comments to any line.
+-   **File Tree Panel**: Browse and open files from a directory tree (`Tab` to toggle focus).
 -   **Git Diff View**: Side-by-side comparison with HEAD, word-level highlighting (`^D` to toggle).
 -   **Keyboard Driven**: Efficient navigation (Arrow keys, `^N`/`^P` for jumping between annotations).
 -   **AI Ready**: Designed to work seamlessly with AI Agents (Claude, etc.).
@@ -60,14 +61,16 @@ export EDITOR=nanot
 | :--- | :--- |
 | `Ctrl` + `X` | Exit (prompts if unsaved) |
 | `Ctrl` + `O` | Save File |
-| `Enter` | **Add/Edit Annotation** |
+| `Enter` | **Add/Edit Annotation** (or open file in tree) |
 | `Del` / `Backspace` | Delete Annotation |
 | `Ctrl` + `N` / `P` | Next / Previous Annotation |
 | `Ctrl` + `Z` / `Y` | Undo / Redo |
 | `Ctrl` + `D` | Toggle Diff View (git) |
 | `Ctrl` + `W` | Search |
 | `Ctrl` + `T` | Toggle Theme |
-| `Ctrl` + `G` | Show Help |
+| `F1` | Show Help |
+| `Tab` | Toggle focus between editor and file tree |
+| `Ctrl` + `G` | Toggle git status in file tree |
 | `PgUp` / `PgDn` | Scroll Page |
 | `Home` / `End` | Jump to Start / End |
 
@@ -80,6 +83,16 @@ When editing a file tracked by git, press `Ctrl+D` to toggle a side-by-side diff
 - **Orange indicator**: Status bar shows `^D Diff` when diff is available
 
 The diff view automatically strips annotations when comparing, so you see actual code changes.
+
+### File Tree Panel
+
+When opening a directory (`nanot .` or `nanot /path/to/dir`), a file tree panel appears on the left:
+- **Tab**: Switch focus between tree and editor
+- **Arrow keys**: Navigate the tree (Up/Down to move, Right to expand, Left to collapse)
+- **Enter**: Open selected file or toggle folder
+- **Ctrl+G**: Toggle git status indicators (shows modified/added/untracked files)
+
+The tree panel shows "(empty)" for empty directories and respects `.gitignore` patterns.
 
 ### Annotation Format & Languages
 

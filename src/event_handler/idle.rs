@@ -73,10 +73,7 @@ pub fn handle_idle_mode(
         };
         return Ok(IdleModeResult::Continue);
     }
-    // Help (Ctrl+G): English 'g', Russian 'п'
-    if matches_ctrl_key(&key, &['g', 'п']) {
-        return Ok(IdleModeResult::ShowHelp);
-    }
+    // Note: Help is F1 (handled in editor.rs), Ctrl+G is for tree/git mode toggle
     // Toggle diff view (Ctrl+D): English 'd', Russian 'в'
     if matches_ctrl_key(&key, &['d', 'в']) {
         return Ok(IdleModeResult::ToggleDiffView);
@@ -349,7 +346,9 @@ mod tests {
     }
 
     #[test]
-    fn test_idle_mode_ctrl_g_shows_help() {
+    fn test_idle_mode_ctrl_g_not_handled_here() {
+        // Ctrl+G is handled in editor.rs (toggle tree/git mode), not in idle.rs
+        // F1 is the help key (also handled in editor.rs)
         let mut lines = vec![Line {
             content: "line1".to_string(),
             annotation: None,
@@ -371,7 +370,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(result, IdleModeResult::ShowHelp));
+        // Ctrl+G is not handled in idle mode handler, returns Continue
+        assert!(matches!(result, IdleModeResult::Continue));
     }
 
     #[test]
@@ -571,7 +571,8 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_view_ctrl_g_shows_help() {
+    fn test_diff_view_ctrl_g_not_handled_here() {
+        // Ctrl+G handled in editor.rs (tree/git toggle), not in idle handler
         let mut lines = vec![Line {
             content: "line1".to_string(),
             annotation: None,
@@ -600,7 +601,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(result, IdleModeResult::ShowHelp));
+        assert!(matches!(result, IdleModeResult::Continue));
     }
 
     #[test]
@@ -754,10 +755,10 @@ mod tests {
         let mut annotation_scroll = 0;
         let mut scroll_offset = 0;
 
-        // Test Ctrl+G in Normal view
+        // Test Ctrl+W (Search) in Normal view
         let normal_view = ViewMode::Normal;
         let result_normal = handle_idle_mode(
-            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
             &mut lines,
             &mut cursor_line,
             &normal_view,
@@ -767,7 +768,7 @@ mod tests {
         )
         .unwrap();
 
-        // Test Ctrl+G in Diff view
+        // Test Ctrl+W in Diff view
         let diff_view = ViewMode::Diff {
             diff_result: DiffResult {
                 lines: vec![DiffLine {
@@ -777,7 +778,7 @@ mod tests {
             },
         };
         let result_diff = handle_idle_mode(
-            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
             &mut lines,
             &mut cursor_line,
             &diff_view,
@@ -787,9 +788,9 @@ mod tests {
         )
         .unwrap();
 
-        // Both should return ShowHelp
-        assert!(matches!(result_normal, IdleModeResult::ShowHelp));
-        assert!(matches!(result_diff, IdleModeResult::ShowHelp));
+        // Both should return EnterSearch
+        assert!(matches!(result_normal, IdleModeResult::EnterSearch));
+        assert!(matches!(result_diff, IdleModeResult::EnterSearch));
     }
 
     // ========================================================================
