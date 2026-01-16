@@ -1,5 +1,15 @@
 use crate::diff::DiffResult;
 
+/// Which panel currently has focus
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum FocusedPanel {
+    /// Editor panel has focus
+    #[default]
+    Editor,
+    /// File tree panel has focus
+    FileTree,
+}
+
 #[derive(Clone)]
 pub struct Line {
     pub content: String,
@@ -39,6 +49,8 @@ pub enum EditorState {
     ShowingHelp,
     /// Asking about unsaved changes before quit
     QuitPrompt,
+    /// Asking about unsaved changes before switching files
+    FileSwitchPrompt { pending_path: std::path::PathBuf },
 }
 
 impl Default for EditorState {
@@ -156,5 +168,51 @@ mod tests {
     fn test_editor_state_quit_prompt() {
         let state = EditorState::QuitPrompt;
         assert!(matches!(state, EditorState::QuitPrompt));
+    }
+
+    // =========================================================================
+    // FocusedPanel Tests
+    // =========================================================================
+
+    #[test]
+    fn test_focused_panel_default_is_editor() {
+        let panel = FocusedPanel::default();
+        assert_eq!(panel, FocusedPanel::Editor);
+    }
+
+    #[test]
+    fn test_focused_panel_clone() {
+        let panel = FocusedPanel::FileTree;
+        let cloned = panel;
+        assert_eq!(cloned, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_focused_panel_equality() {
+        assert_eq!(FocusedPanel::Editor, FocusedPanel::Editor);
+        assert_eq!(FocusedPanel::FileTree, FocusedPanel::FileTree);
+        assert_ne!(FocusedPanel::Editor, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_focused_panel_copy_trait() {
+        // Verify FocusedPanel implements Copy
+        let panel = FocusedPanel::Editor;
+        let copied = panel; // Should copy, not move
+        // Both should still be usable
+        assert_eq!(panel, FocusedPanel::Editor);
+        assert_eq!(copied, FocusedPanel::Editor);
+    }
+
+    #[test]
+    fn test_focused_panel_debug_format() {
+        // Verify Debug trait formatting
+        let editor_panel = FocusedPanel::Editor;
+        let tree_panel = FocusedPanel::FileTree;
+        let editor_debug = format!("{:?}", editor_panel);
+        let tree_debug = format!("{:?}", tree_panel);
+
+        assert!(editor_debug.contains("Editor"));
+        assert!(tree_debug.contains("FileTree"));
     }
 }

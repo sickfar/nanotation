@@ -1,7 +1,9 @@
 //! Git integration module for reading HEAD content and checking file status.
 
-use git2::Repository;
+use git2::{DiffOptions, Repository, Status};
 use std::path::Path;
+
+use crate::file_tree::GitChangedFile;
 
 /// Error types for git operations
 #[derive(Debug)]
@@ -140,6 +142,140 @@ pub fn get_head_content(path: &str) -> Result<String, GitError> {
     Ok(content.to_string())
 }
 
+/// Get list of changed files in a git repository
+pub fn get_changed_files(root_path: &Path) -> Result<Vec<GitChangedFile>, GitError> {
+    let abs_path = if root_path.is_absolute() {
+        root_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(root_path))
+            .map_err(|_| GitError::NotARepo)?
+    };
+
+    // Canonicalize to resolve symlinks (important on macOS where /var -> /private/var)
+    let abs_path = abs_path.canonicalize().map_err(|_| GitError::NotARepo)?;
+
+    let repo = Repository::discover(&abs_path).map_err(|_| GitError::NotARepo)?;
+    let workdir = repo.workdir().ok_or(GitError::NotARepo)?;
+
+    let mut changed_files = Vec::new();
+
+    // Get status of all files
+    let statuses = repo.statuses(None)?;
+
+    for entry in statuses.iter() {
+        let status = entry.status();
+
+        // Skip ignored files
+        if status.is_ignored() {
+            continue;
+        }
+
+        // Check if file is changed (modified, new, deleted, etc.)
+        let is_changed = status.intersects(
+            Status::INDEX_NEW
+                | Status::INDEX_MODIFIED
+                | Status::INDEX_DELETED
+                | Status::INDEX_RENAMED
+                | Status::INDEX_TYPECHANGE
+                | Status::WT_NEW
+                | Status::WT_MODIFIED
+                | Status::WT_DELETED
+                | Status::WT_RENAMED
+                | Status::WT_TYPECHANGE,
+        );
+
+        if !is_changed {
+            continue;
+        }
+
+        let is_untracked = status.is_wt_new() && !status.is_index_new();
+        let file_path = entry.path().map(|p| workdir.join(p));
+
+        if let Some(file_path) = file_path {
+            // Only include files under the requested root path
+            if !file_path.starts_with(&abs_path) {
+                continue;
+            }
+
+            // Get diff stats for this file
+            let (added, removed) = get_file_diff_stats(&repo, &file_path, is_untracked)?;
+
+            changed_files.push(GitChangedFile {
+                path: file_path,
+                added_lines: added,
+                removed_lines: removed,
+                is_untracked,
+            });
+        }
+    }
+
+    // Sort by path for consistent ordering
+    changed_files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    Ok(changed_files)
+}
+
+/// Get diff stats (added/removed lines) for a single file
+fn get_file_diff_stats(
+    repo: &Repository,
+    file_path: &Path,
+    is_untracked: bool,
+) -> Result<(usize, usize), GitError> {
+    let workdir = repo.workdir().ok_or(GitError::NotARepo)?;
+    let relative_path = file_path
+        .strip_prefix(workdir)
+        .map_err(|_| GitError::NotARepo)?;
+
+    if is_untracked {
+        // For untracked files, count all lines as added
+        if let Ok(content) = std::fs::read_to_string(file_path) {
+            let line_count = content.lines().count();
+            return Ok((line_count, 0));
+        }
+        return Ok((0, 0));
+    }
+
+    // Get HEAD tree
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(_) => {
+            // No HEAD means new repo, count all lines as added
+            if let Ok(content) = std::fs::read_to_string(file_path) {
+                return Ok((content.lines().count(), 0));
+            }
+            return Ok((0, 0));
+        }
+    };
+
+    let head_tree = head.peel_to_tree().ok();
+
+    // Create diff options to filter to just this file
+    let mut opts = DiffOptions::new();
+    opts.pathspec(relative_path);
+
+    let diff = repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))?;
+
+    let mut added = 0;
+    let mut removed = 0;
+
+    diff.foreach(
+        &mut |_, _| true,
+        None,
+        None,
+        Some(&mut |_, _, line| {
+            match line.origin() {
+                '+' => added += 1,
+                '-' => removed += 1,
+                _ => {}
+            }
+            true
+        }),
+    )?;
+
+    Ok((added, removed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,25 +286,36 @@ mod tests {
     fn create_git_repo() -> TempDir {
         let dir = TempDir::new().unwrap();
 
-        // Initialize git repo
-        Command::new("git")
+        // Initialize git repo and verify success
+        let output = Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to init git repo");
+            .expect("Failed to run git init");
+        assert!(output.status.success(), "git init failed: {:?}", output);
 
         // Configure git user for commits
-        Command::new("git")
+        let output = Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to configure git email");
+            .expect("Failed to run git config email");
+        assert!(output.status.success(), "git config email failed: {:?}", output);
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to configure git name");
+            .expect("Failed to run git config name");
+        assert!(output.status.success(), "git config name failed: {:?}", output);
+
+        // Disable commit signing for tests (avoid issues with signing hooks)
+        let output = Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to run git config gpgsign");
+        assert!(output.status.success(), "git config gpgsign failed: {:?}", output);
 
         dir
     }
@@ -177,17 +324,27 @@ mod tests {
         let file_path = dir.path().join(filename);
         fs::write(&file_path, content).unwrap();
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["add", filename])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to add file");
+            .expect("Failed to run git add");
+        assert!(output.status.success(), "git add failed: {:?}", output);
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["commit", "-m", "Add file"])
             .current_dir(dir.path())
             .output()
-            .expect("Failed to commit");
+            .expect("Failed to run git commit");
+        assert!(output.status.success(), "git commit failed: {:?}", output);
+
+        // Verify the commit exists by checking HEAD
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to run git rev-parse");
+        assert!(output.status.success(), "git rev-parse HEAD failed - commit not created: {:?}", output);
     }
 
     #[test]
@@ -278,5 +435,82 @@ mod tests {
 
         let result = get_head_content(file_path.to_str().unwrap());
         assert!(matches!(result, Err(GitError::NotARepo)));
+    }
+
+    #[test]
+    fn test_get_changed_files_no_changes() {
+        let dir = create_git_repo();
+        add_and_commit_file(&dir, "test.txt", "content");
+
+        let result = get_changed_files(dir.path());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_changed_files_modified() {
+        let dir = create_git_repo();
+        add_and_commit_file(&dir, "test.txt", "line1\nline2\nline3");
+
+        // Modify the file
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "line1\nmodified\nline3\nnew line").unwrap();
+
+        let result = get_changed_files(dir.path());
+        assert!(result.is_ok());
+        let files = result.unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(!files[0].is_untracked);
+        // Should have added and removed lines
+        assert!(files[0].added_lines > 0 || files[0].removed_lines > 0);
+    }
+
+    #[test]
+    fn test_get_changed_files_untracked() {
+        let dir = create_git_repo();
+        add_and_commit_file(&dir, "initial.txt", "initial");
+
+        // Create an untracked file
+        let file_path = dir.path().join("new_file.txt");
+        fs::write(&file_path, "line1\nline2\nline3").unwrap();
+
+        let result = get_changed_files(dir.path());
+        assert!(result.is_ok());
+        let files = result.unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].is_untracked);
+        assert_eq!(files[0].added_lines, 3); // All lines counted as added
+        assert_eq!(files[0].removed_lines, 0);
+    }
+
+    #[test]
+    fn test_get_changed_files_not_a_repo() {
+        let dir = TempDir::new().unwrap();
+        let result = get_changed_files(dir.path());
+        assert!(matches!(result, Err(GitError::NotARepo)));
+    }
+
+    #[test]
+    fn test_get_changed_files_sorted() {
+        let dir = create_git_repo();
+        add_and_commit_file(&dir, "initial.txt", "initial");
+
+        // Create multiple untracked files
+        fs::write(dir.path().join("zebra.txt"), "content").unwrap();
+        fs::write(dir.path().join("apple.txt"), "content").unwrap();
+        fs::write(dir.path().join("banana.txt"), "content").unwrap();
+
+        let result = get_changed_files(dir.path());
+        assert!(result.is_ok());
+        let files = result.unwrap();
+
+        // Should be sorted by path
+        let names: Vec<_> = files.iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
     }
 }

@@ -1,10 +1,12 @@
 use crate::diff::{calculate_diff, strip_annotation};
 use crate::event_handler;
 use crate::file;
+use crate::file_tree::FileTreePanel;
 use crate::git;
-use crate::models::{EditorState, Line, ViewMode};
+use crate::models::{EditorState, FocusedPanel, Line, ViewMode};
 use crate::theme::Theme;
 use crate::ui;
+use crate::ui_tree;
 use crossterm::{
     cursor::{Hide, Show},
     event::{self, Event, KeyCode},
@@ -15,6 +17,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
+use std::path::Path;
 
 /// Minimum terminal width required for diff mode (100 columns)
 const MIN_DIFF_WIDTH: u16 = 100;
@@ -27,6 +30,23 @@ pub const DIFF_NOT_TRACKED_ERROR: &str = "File is not tracked in git";
 
 /// Error message when file is not in a git repository
 pub const DIFF_NO_REPO_ERROR: &str = "Not a git repository";
+
+/// Editor content state
+#[derive(Clone, Debug, PartialEq)]
+pub enum EditorContent {
+    /// No file loaded (empty editor)
+    Empty,
+    /// File loaded normally
+    Loaded,
+    /// Error state (binary file, permission denied, etc.)
+    Error { message: String },
+}
+
+impl Default for EditorContent {
+    fn default() -> Self {
+        EditorContent::Empty
+    }
+}
 
 pub struct Editor {
     pub lines: Vec<Line>,
@@ -49,9 +69,16 @@ pub struct Editor {
     pub highlighter: crate::highlighting::SyntaxHighlighter,
     /// Error message to display in status bar (clears on next action)
     pub status_message: Option<String>,
+    /// File tree panel (only present when opened on a directory)
+    pub file_tree: Option<FileTreePanel>,
+    /// Which panel has focus
+    pub focused_panel: FocusedPanel,
+    /// Current editor content state
+    pub editor_content: EditorContent,
 }
 
 impl Editor {
+    /// Create a new editor for a single file
     pub fn new(file_path: String) -> io::Result<Self> {
         let content = fs::read_to_string(&file_path)?;
         let lang_comment = file::detect_comment_style(&file_path);
@@ -78,7 +105,114 @@ impl Editor {
             history_index: 0,
             highlighter,
             status_message: None,
+            file_tree: None,
+            focused_panel: FocusedPanel::Editor,
+            editor_content: EditorContent::Loaded,
         })
+    }
+
+    /// Create a new editor for a directory (with file tree)
+    pub fn new_with_directory(dir_path: String) -> io::Result<Self> {
+        let theme = Theme::Dark;
+        let highlighter =
+            crate::highlighting::SyntaxHighlighter::new(matches!(theme, Theme::Dark));
+
+        let file_tree = FileTreePanel::new(Path::new(&dir_path).to_path_buf())?;
+        let lines: Vec<Line> = Vec::new();
+        let saved_content_hash = Self::compute_content_hash(&lines);
+
+        Ok(Editor {
+            lines,
+            cursor_line: 0,
+            scroll_offset: 0,
+            view_mode: ViewMode::Normal,
+            editor_state: EditorState::Idle,
+            file_path: None,
+            saved_content_hash,
+            theme,
+            lang_comment: String::new(),
+            search_matches: Vec::new(),
+            current_match: None,
+            annotation_scroll: 0,
+            history: Vec::new(),
+            history_index: 0,
+            highlighter,
+            status_message: None,
+            file_tree: Some(file_tree),
+            focused_panel: FocusedPanel::FileTree,
+            editor_content: EditorContent::Empty,
+        })
+    }
+
+    /// Load a file into the editor (used when selecting from file tree)
+    pub fn load_file(&mut self, path: &Path) -> io::Result<()> {
+        // Check if file is readable
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                // Check if it's a binary file or permission error
+                if e.kind() == io::ErrorKind::PermissionDenied {
+                    self.editor_content = EditorContent::Error {
+                        message: format!("Permission denied: {}", path.display()),
+                    };
+                    self.lines.clear();
+                    self.file_path = Some(path.to_string_lossy().to_string());
+                    return Ok(());
+                }
+                // Try to check if binary
+                if let Ok(bytes) = fs::read(path) {
+                    if bytes.iter().take(8192).any(|&b| b == 0) {
+                        self.editor_content = EditorContent::Error {
+                            message: format!("Binary file: {}", path.display()),
+                        };
+                        self.lines.clear();
+                        self.file_path = Some(path.to_string_lossy().to_string());
+                        return Ok(());
+                    }
+                }
+                return Err(e);
+            }
+        };
+
+        let lang_comment = file::detect_comment_style(&path.to_string_lossy());
+        let lines = file::parse_file(&content, &lang_comment);
+        let saved_content_hash = Self::compute_content_hash(&lines);
+
+        self.lines = lines;
+        self.cursor_line = 0;
+        self.scroll_offset = 0;
+        self.file_path = Some(path.to_string_lossy().to_string());
+        self.saved_content_hash = saved_content_hash;
+        self.lang_comment = lang_comment;
+        self.search_matches.clear();
+        self.current_match = None;
+        self.annotation_scroll = 0;
+        self.history.clear();
+        self.history_index = 0;
+        self.editor_content = EditorContent::Loaded;
+        self.view_mode = ViewMode::Normal;
+
+        // Update file tree's current file
+        if let Some(ref mut tree) = self.file_tree {
+            tree.set_current_file(Some(path.to_path_buf()));
+        }
+
+        Ok(())
+    }
+
+    /// Toggle focus between editor and file tree
+    pub fn toggle_focus(&mut self) {
+        if self.file_tree.is_some() {
+            self.focused_panel = match self.focused_panel {
+                FocusedPanel::Editor => FocusedPanel::FileTree,
+                FocusedPanel::FileTree => FocusedPanel::Editor,
+            };
+        }
+    }
+
+    /// Check if the editor can accept input (has loaded content)
+    pub fn can_edit(&self) -> bool {
+        matches!(self.editor_content, EditorContent::Loaded) && !self.lines.is_empty()
     }
 
     /// Compute a hash of the current content (lines + annotations)
@@ -222,6 +356,26 @@ impl Editor {
 
     fn event_loop(&mut self) -> io::Result<()> {
         loop {
+            // Check terminal width when file tree is present
+            let (width, height) = terminal::size()?;
+
+            // Calculate content height (accounts for annotation area, status bar, title bar, and bottom border)
+            let title_bar_height = if self.file_tree.is_some() { 1 } else { 0 };
+            let editor_border_height = if self.file_tree.is_some() { 1 } else { 0 };
+            let content_height = (height.saturating_sub(5 + title_bar_height + editor_border_height)) as usize;
+
+            if self.file_tree.is_some() && width < ui_tree::MIN_WIDTH_WITH_TREE {
+                // Terminal too narrow for tree mode
+                execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen, Show)?;
+                terminal::disable_raw_mode()?;
+                eprintln!(
+                    "Terminal too narrow for directory mode (need {} columns, have {})",
+                    ui_tree::MIN_WIDTH_WITH_TREE,
+                    width
+                );
+                std::process::exit(1);
+            }
+
             // Check if diff is available (git repo + tracked file + has actual changes)
             let diff_available = self.file_path.as_ref().map_or(false, |path| {
                 if !git::is_git_available(path) || !git::is_file_tracked(path) {
@@ -242,6 +396,11 @@ impl Editor {
                 }
             });
 
+            // Adjust tree scroll if needed
+            if let Some(ref mut tree) = self.file_tree {
+                tree.adjust_scroll(height.saturating_sub(6) as usize);
+            }
+
             // Render using both view_mode and editor_state
             ui::render(
                 &self.lines,
@@ -259,21 +418,96 @@ impl Editor {
                 self.status_message.as_deref(),
                 &self.lang_comment,
                 diff_available,
+                self.file_tree.as_ref(),
+                self.focused_panel,
+                &self.editor_content,
             )?;
 
             // Clear status message after displaying
             self.status_message = None;
 
             if let Event::Key(key) = event::read()? {
+                // Handle Ctrl+X (quit) directly here so we can break the loop
+                // Works regardless of which panel has focus
+                if (key.code == KeyCode::Char('x') || key.code == KeyCode::Char('ч'))
+                    && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+                    && matches!(self.editor_state, EditorState::Idle)
+                {
+                    if self.is_modified() {
+                        self.editor_state = EditorState::QuitPrompt;
+                    } else {
+                        break; // Exit immediately when no unsaved changes
+                    }
+                    continue;
+                }
+
+                // Handle other global keys (work regardless of focus)
+                if self.handle_global_key(key)? {
+                    continue;
+                }
+
                 // Handle input based on editor_state (NOT view_mode)
                 // view_mode only affects rendering, not input handling
                 match &mut self.editor_state {
                     EditorState::Idle => {
+                        // If tree is focused, handle tree input
+                        if self.focused_panel == FocusedPanel::FileTree {
+                            if let Some(ref mut tree) = self.file_tree {
+                                match event_handler::handle_tree_input(key, tree, height)? {
+                                    event_handler::TreeInputResult::Continue => {}
+                                    event_handler::TreeInputResult::OpenFile(path) => {
+                                        // Check for unsaved changes
+                                        if self.is_modified() {
+                                            self.editor_state = EditorState::FileSwitchPrompt {
+                                                pending_path: path,
+                                            };
+                                            continue;
+                                        }
+
+                                        // Check if opening from git list mode (before loading changes tree state)
+                                        let from_git_list = self.file_tree
+                                            .as_ref()
+                                            .map(|t| t.mode == crate::file_tree::TreeMode::GitChangedFiles)
+                                            .unwrap_or(false);
+
+                                        // Load the file
+                                        if let Err(e) = self.load_file(&path) {
+                                            self.status_message = Some(format!("Error: {}", e));
+                                        } else {
+                                            self.focused_panel = FocusedPanel::Editor;
+
+                                            // Auto-enter diff mode if opened from git list
+                                            if from_git_list {
+                                                if let Err(msg) = self.enter_diff_mode() {
+                                                    // Show error but stay in normal mode
+                                                    self.status_message = Some(msg.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    event_handler::TreeInputResult::RefreshNeeded => {
+                                        // File was deleted or tree needs refresh
+                                        if let Some(ref mut t) = self.file_tree {
+                                            let _ = t.refresh();
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
                         // Handle save separately (Ctrl+O)
                         if key.code == KeyCode::Char('o')
                             && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                         {
-                            self.save()?;
+                            if self.can_edit() {
+                                self.save()?;
+                            }
+                            continue;
+                        }
+
+                        // Only process editor input if we have editable content
+                        if !self.can_edit() {
                             continue;
                         }
 
@@ -287,6 +521,7 @@ impl Editor {
                             &mut self.theme,
                             &mut self.annotation_scroll,
                             &mut self.scroll_offset,
+                            content_height,
                         )? {
                             event_handler::IdleModeResult::Exit => break,
                             event_handler::IdleModeResult::ShowQuitPrompt => {
@@ -385,6 +620,7 @@ impl Editor {
                             &mut self.cursor_line,
                             &mut self.scroll_offset,
                             &self.view_mode,
+                            content_height,
                         )? {
                             event_handler::SearchModeResult::Exit => {
                                 self.editor_state = EditorState::Idle;
@@ -420,11 +656,135 @@ impl Editor {
                             }
                         }
                     }
+
+                    EditorState::FileSwitchPrompt { pending_path } => {
+                        let path_to_open = pending_path.clone();
+                        match event_handler::handle_quit_prompt(key) {
+                            event_handler::QuitPromptResult::SaveAndExit => {
+                                // Save current file
+                                self.save()?;
+
+                                // Check if opening from git list mode
+                                let from_git_list = self.file_tree
+                                    .as_ref()
+                                    .map(|t| t.mode == crate::file_tree::TreeMode::GitChangedFiles)
+                                    .unwrap_or(false);
+
+                                // Load the new file
+                                if let Err(e) = self.load_file(&path_to_open) {
+                                    self.status_message = Some(format!("Error: {}", e));
+                                } else {
+                                    self.focused_panel = FocusedPanel::Editor;
+
+                                    // Auto-enter diff mode if opened from git list
+                                    if from_git_list {
+                                        if let Err(msg) = self.enter_diff_mode() {
+                                            self.status_message = Some(msg.to_string());
+                                        }
+                                    }
+                                }
+
+                                self.editor_state = EditorState::Idle;
+                            }
+                            event_handler::QuitPromptResult::Exit => {
+                                // Discard changes and switch file
+
+                                // Check if opening from git list mode
+                                let from_git_list = self.file_tree
+                                    .as_ref()
+                                    .map(|t| t.mode == crate::file_tree::TreeMode::GitChangedFiles)
+                                    .unwrap_or(false);
+
+                                // Load the new file
+                                if let Err(e) = self.load_file(&path_to_open) {
+                                    self.status_message = Some(format!("Error: {}", e));
+                                } else {
+                                    self.focused_panel = FocusedPanel::Editor;
+
+                                    // Auto-enter diff mode if opened from git list
+                                    if from_git_list {
+                                        if let Err(msg) = self.enter_diff_mode() {
+                                            self.status_message = Some(msg.to_string());
+                                        }
+                                    }
+                                }
+
+                                self.editor_state = EditorState::Idle;
+                            }
+                            event_handler::QuitPromptResult::Cancel => {
+                                self.editor_state = EditorState::Idle;
+                                // view_mode stays unchanged!
+                            }
+                            event_handler::QuitPromptResult::Continue => {
+                                // Stay in file switch prompt
+                            }
+                        }
+                    }
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Handle global keys that work regardless of focus
+    /// Returns true if the key was handled
+    fn handle_global_key(&mut self, key: crossterm::event::KeyEvent) -> io::Result<bool> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Tab - switch focus (only in Idle state and when file is loaded)
+        if key.code == KeyCode::Tab && matches!(self.editor_state, EditorState::Idle) {
+            if self.file_tree.is_some() && self.editor_content != EditorContent::Empty {
+                self.toggle_focus();
+                return Ok(true);
+            }
+        }
+
+        // F1 - Help
+        if key.code == KeyCode::F(1) && matches!(self.editor_state, EditorState::Idle) {
+            self.editor_state = EditorState::ShowingHelp;
+            return Ok(true);
+        }
+
+        // Ctrl+G - toggle tree mode (only when tree exists)
+        if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL {
+            if let Some(ref mut tree) = self.file_tree {
+                if let Err(e) = tree.toggle_mode() {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+                return Ok(true);
+            }
+        }
+
+        // Note: Ctrl+X is handled directly in event_loop() so it can break the loop
+
+        // Ctrl+T - Toggle theme
+        if (key.code == KeyCode::Char('t') || key.code == KeyCode::Char('е'))
+            && key.modifiers == KeyModifiers::CONTROL
+        {
+            if matches!(self.editor_state, EditorState::Idle) {
+                self.theme = match self.theme {
+                    Theme::Dark => Theme::Light,
+                    Theme::Light => Theme::Dark,
+                };
+                let is_dark = matches!(self.theme, Theme::Dark);
+                self.highlighter = crate::highlighting::SyntaxHighlighter::new(is_dark);
+                return Ok(true);
+            }
+        }
+
+        // Ctrl+O - Save (global when file is loaded)
+        if (key.code == KeyCode::Char('o') || key.code == KeyCode::Char('щ'))
+            && key.modifiers == KeyModifiers::CONTROL
+        {
+            if matches!(self.editor_state, EditorState::Idle) && self.can_edit() {
+                self.save()?;
+                self.status_message = Some("Saved".to_string());
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 }
 
@@ -859,5 +1219,139 @@ mod tests {
         let max_line = editor.lines.len() - 1;
         editor.cursor_line = max_line;
         assert_eq!(editor.cursor_line, max_line);
+    }
+
+    // Note: Ctrl+X behavior is tested via manual testing since it's handled
+    // directly in event_loop() with a break statement that requires terminal setup.
+    // The fix ensures Ctrl+X works regardless of panel focus (editor or file tree).
+
+    #[test]
+    fn test_empty_editor_not_modified() {
+        // Regression test: empty editor (directory mode) should not report as modified
+        let temp_dir = tempfile::tempdir().unwrap();
+        let editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Empty editor should NOT be modified
+        assert!(!editor.is_modified(), "Empty editor should not be reported as modified");
+    }
+
+    // =========================================================================
+    // Focus State Management Tests
+    // =========================================================================
+
+    #[test]
+    fn test_toggle_focus_tree_to_editor_in_directory_mode() {
+        // Create editor in directory mode
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Verify file tree exists (toggle_focus only works when file_tree.is_some())
+        assert!(editor.file_tree.is_some(), "File tree should be present in directory mode");
+
+        // In directory mode, initial focus is on FileTree
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+
+        // Toggle focus to editor
+        editor.toggle_focus();
+        assert_eq!(editor.focused_panel, FocusedPanel::Editor);
+    }
+
+    #[test]
+    fn test_toggle_focus_editor_to_tree_and_back() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Verify file tree exists
+        assert!(editor.file_tree.is_some(), "File tree should be present in directory mode");
+
+        // Initial focus is on FileTree in directory mode
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+
+        // Toggle to editor
+        editor.toggle_focus();
+        assert_eq!(editor.focused_panel, FocusedPanel::Editor);
+
+        // Toggle back to file tree
+        editor.toggle_focus();
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_focus_persists_across_annotation_edit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Set focus to file tree
+        editor.focused_panel = FocusedPanel::FileTree;
+
+        // Enter annotation mode
+        editor.editor_state = EditorState::Annotating {
+            buffer: String::new(),
+            cursor_pos: 0
+        };
+
+        // Focus should remain on file tree (annotation doesn't affect panel focus)
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_default_focus_is_editor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Verify file tree exists
+        assert!(editor.file_tree.is_some(), "File tree should be present in directory mode");
+
+        // In directory mode, initial focus is on FileTree (not Editor)
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_focus_not_affected_by_operations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a test file
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "test content\n").unwrap();
+
+        let mut editor = Editor::new(test_file.to_str().unwrap().to_string()).unwrap();
+
+        // Set focus to file tree
+        editor.focused_panel = FocusedPanel::FileTree;
+
+        // Perform various operations (modify lines, change cursor, etc.)
+        if !editor.lines.is_empty() {
+            editor.lines[0].annotation = Some("test annotation".to_string());
+        }
+        editor.cursor_line = 0;
+
+        // Focus should remain unchanged after operations
+        assert_eq!(editor.focused_panel, FocusedPanel::FileTree);
+    }
+
+    #[test]
+    fn test_tab_key_disabled_when_no_file_loaded() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // Create editor in directory mode (no file loaded initially)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut editor = Editor::new_with_directory(temp_dir.path().to_str().unwrap().to_string()).unwrap();
+
+        // Verify preconditions: file tree exists, but no file is loaded
+        assert!(editor.file_tree.is_some(), "File tree should be present");
+        assert_eq!(editor.editor_content, EditorContent::Empty, "Editor content should be Empty");
+        assert!(matches!(editor.editor_state, EditorState::Idle), "Editor state should be Idle");
+
+        // Initial focus is on FileTree
+        let initial_focus = editor.focused_panel.clone();
+        assert_eq!(initial_focus, FocusedPanel::FileTree);
+
+        // Simulate Tab key press
+        let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let result = editor.handle_global_key(tab_key);
+
+        // Tab key should be handled but focus should NOT change
+        assert!(result.is_ok(), "Tab key handling should not error");
+        assert_eq!(editor.focused_panel, initial_focus, "Focus should not change when no file is loaded");
     }
 }

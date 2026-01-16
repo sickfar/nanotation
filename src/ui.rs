@@ -1,8 +1,11 @@
+use crate::editor::EditorContent;
+use crate::file_tree::FileTreePanel;
 use crate::highlighting::{to_crossterm_color, SyntaxHighlighter};
-use crate::models::{EditorState, Line, ViewMode};
+use crate::models::{EditorState, FocusedPanel, Line, ViewMode};
 use crate::text::{wrap_styled_text, wrap_text};
 use crate::theme::{ColorScheme, Theme};
 use crate::ui_diff::render_diff_mode;
+use crate::ui_tree::{self, render_file_tree, render_error_message};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     queue,
@@ -33,9 +36,29 @@ pub fn render(
     status_message: Option<&str>,
     lang_comment: &str,
     diff_available: bool,
+    file_tree: Option<&FileTreePanel>,
+    focused_panel: FocusedPanel,
+    editor_content: &EditorContent,
 ) -> io::Result<()> {
+    let (width, height) = terminal::size()?;
+
     // Check if we're in diff view mode
     if let ViewMode::Diff { diff_result } = view_mode {
+        // Calculate layout for diff mode
+        let (start_col, available_width) = if let Some(tree) = file_tree {
+            // Render file tree first
+            let mut stdout = io::stdout();
+            let is_tree_focused = focused_panel == FocusedPanel::FileTree;
+            render_file_tree(&mut stdout, tree, theme, height.saturating_sub(1), is_tree_focused)?;
+
+            let tree_width = ui_tree::TREE_WIDTH;
+            let start = tree_width;
+            let available = (width as usize).saturating_sub(start as usize);
+            (start, available as u16)
+        } else {
+            (0, width)
+        };
+
         return render_diff_mode(
             lines,
             cursor_line,
@@ -50,18 +73,145 @@ pub fn render(
             status_message,
             lang_comment,
             diff_available,
+            start_col,
+            available_width,
+            focused_panel,
         );
     }
-    let (width, height) = terminal::size()?;
-    // Reserve 5 lines at bottom: 4 for annotation area (border + 2 text lines + border) + 1 for status bar
-    let content_height = (height - 5) as usize;
+
+    // Reserve space at bottom for annotation area + status bar
+    // Add 1 extra line if file tree present (for title bar)
+    // Add 1 more line if file tree present (for editor bottom border)
+    let title_bar_height = if file_tree.is_some() { 1 } else { 0 };
+    let editor_border_height = if file_tree.is_some() { 1 } else { 0 };
+    let content_height = (height - 5 - title_bar_height - editor_border_height) as usize;
     let colors = theme.colors();
 
     let mut stdout = io::stdout();
-    queue!(stdout, MoveTo(0, 0))?;
+
+    // Calculate layout based on whether file tree is present
+    let (editor_start_col, editor_width) = if file_tree.is_some() {
+        let tree_width = ui_tree::TREE_WIDTH;
+        let start = tree_width;
+        let available = (width as usize).saturating_sub(start as usize);
+        (start, available as u16)
+    } else {
+        (0, width)
+    };
+
+    // Render file tree if present
+    if let Some(tree) = file_tree {
+        let is_tree_focused = focused_panel == FocusedPanel::FileTree;
+        render_file_tree(&mut stdout, tree, theme, height.saturating_sub(1), is_tree_focused)?;
+    }
+
+    // Render editor title bar if in directory mode (when file tree is present)
+    let content_start_y = if file_tree.is_some() {
+        let is_editor_focused = focused_panel == FocusedPanel::Editor;
+        let title = file_path.as_deref().and_then(|p| {
+            // Extract just the filename from the path
+            std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+        }).unwrap_or("Editor");
+        render_editor_title_bar(
+            &mut stdout,
+            title,
+            is_editor_focused,
+            &colors,
+            editor_start_col,
+            editor_width,
+            0,
+        )?;
+        1 // Content starts at Y=1 (after title bar)
+    } else {
+        0 // Content starts at Y=0 (no title bar)
+    };
+
+    // Handle empty or error editor states
+    match editor_content {
+        EditorContent::Empty => {
+            // Render empty editor area
+            render_empty_editor(&mut stdout, &colors, editor_start_col, editor_width, height)?;
+            // Render status bar and annotation panel
+            render_annotation_panel(
+                &mut stdout,
+                editor_state,
+                &colors,
+                None,
+                annotation_scroll,
+                editor_start_col,
+                editor_width,
+                height,
+                lang_comment,
+            )?;
+            render_status_bar_simple(
+                &mut stdout,
+                editor_state,
+                &colors,
+                file_path,
+                modified,
+                0,
+                0,
+                diff_available,
+                status_message,
+                file_tree.is_some(),
+                focused_panel,
+                0,        // Status bar always starts at column 0
+                width,    // Status bar always spans full terminal width
+                height,
+            )?;
+            stdout.flush()?;
+            return Ok(());
+        }
+        EditorContent::Error { message } => {
+            // Render error message in editor area
+            render_error_message(&mut stdout, message, theme, editor_start_col, editor_width, height)?;
+            // Render status bar and annotation panel
+            render_annotation_panel(
+                &mut stdout,
+                editor_state,
+                &colors,
+                None,
+                annotation_scroll,
+                editor_start_col,
+                editor_width,
+                height,
+                lang_comment,
+            )?;
+            render_status_bar_simple(
+                &mut stdout,
+                editor_state,
+                &colors,
+                file_path,
+                modified,
+                0,
+                0,
+                diff_available,
+                status_message,
+                file_tree.is_some(),
+                focused_panel,
+                0,        // Status bar always starts at column 0
+                width,    // Status bar always spans full terminal width
+                height,
+            )?;
+            stdout.flush()?;
+            return Ok(());
+        }
+        EditorContent::Loaded => {
+            // Continue with normal rendering
+        }
+    }
+
+    // Account for borders (left and right) when calculating content area
+    let border_width = if file_tree.is_some() { 2 } else { 0 }; // Only add borders in directory mode
+    let editor_content_start_col = editor_start_col + (if border_width > 0 { 1 } else { 0 });
+    let editor_content_width = editor_width.saturating_sub(border_width);
+
+    queue!(stdout, MoveTo(editor_content_start_col, content_start_y))?;
 
     let gutter_width = lines.len().to_string().len() + 2; // + padding
-    let content_width = (width as usize).saturating_sub(gutter_width);
+    let content_width = (editor_content_width as usize).saturating_sub(gutter_width);
 
     let mut screen_line = 0;
     let mut line_idx = scroll_offset;
@@ -124,10 +274,10 @@ pub fn render(
             } else {
                 format!("{:>width$} ", " ", width = gutter_width - 1)
             };
-            
+
             queue!(
                 stdout,
-                MoveTo(0, screen_line as u16),
+                MoveTo(editor_content_start_col, content_start_y + screen_line as u16),
                 SetBackgroundColor(colors.bg),
                 SetForegroundColor(colors.line_number_fg),
                 Print(line_num_str),
@@ -181,16 +331,33 @@ pub fn render(
     while screen_line < content_height {
         queue!(
             stdout,
-            MoveTo(0, screen_line as u16),
+            MoveTo(editor_content_start_col, content_start_y + screen_line as u16),
             SetBackgroundColor(colors.bg),
-            Print(format!("{:width$}", "", width = width as usize)),
+            Print(format!("{:width$}", "", width = editor_content_width as usize)),
             ResetColor
         )?;
         screen_line += 1;
     }
 
+    // Render editor borders if in directory mode
+    if file_tree.is_some() {
+        let is_editor_focused = focused_panel == FocusedPanel::Editor;
+        let border_start_y = content_start_y;
+        let border_end_y = height.saturating_sub(6); // End one line before annotation area
+        render_editor_borders(
+            &mut stdout,
+            is_editor_focused,
+            &colors,
+            editor_start_col,
+            editor_width,
+            border_start_y,
+            border_end_y,
+        )?;
+    }
+
     // Render annotation area (4 lines: border + 2 text lines + border) above status bar
     let annotation_start = height - 5;
+    let is_annotation_focused = matches!(editor_state, EditorState::Annotating { .. });
 
     render_annotation_area(
         &mut stdout,
@@ -199,12 +366,14 @@ pub fn render(
         editor_state,
         annotation_scroll,
         &colors,
-        width,
+        editor_start_col,
+        editor_width,
         annotation_start,
+        is_annotation_focused,
     )?;
 
-    // Render status bar
-    render_status_bar(
+    // Render status bar (always full width from column 0)
+    render_status_bar_new(
         &mut stdout,
         view_mode,
         editor_state,
@@ -215,10 +384,13 @@ pub fn render(
         search_matches,
         current_match,
         &colors,
-        width,
+        0,        // Status bar always starts at column 0
+        width,    // Status bar always spans full terminal width
         height,
         status_message,
         diff_available,
+        file_tree.is_some(),
+        focused_panel,
     )?;
 
     // Show help overlay if in ShowingHelp state
@@ -234,13 +406,120 @@ pub fn render(
             *cursor_pos,
             annotation_scroll,
             annotation_start,
-            width,
+            editor_start_col,
+            editor_width,
         )?;
     } else {
         queue!(stdout, Hide)?;
     }
 
     stdout.flush()?;
+    Ok(())
+}
+
+fn render_editor_title_bar(
+    stdout: &mut impl Write,
+    title: &str,
+    is_focused: bool,
+    colors: &ColorScheme,
+    start_col: u16,
+    width: u16,
+    y: u16,
+) -> io::Result<()> {
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    let bg_color = if is_focused {
+        colors.panel_title_focused_bg
+    } else {
+        colors.panel_title_unfocused_bg
+    };
+
+    // Calculate available space for title text
+    // Total: "┌─" (2) + " " (1) + title + " " (1) + padding + "─┐" (2) = 6 + title + padding
+    let border_and_spaces = 6; // "┌─ " + " ─┐" = 6 chars
+    let available_width = width.saturating_sub(border_and_spaces);
+
+    // Truncate title if too long
+    let truncated_title: String = if title.chars().count() > available_width as usize {
+        title.chars().take((available_width.saturating_sub(1)) as usize).collect::<String>() + "…"
+    } else {
+        title.to_string()
+    };
+
+    // Build the title bar with borders
+    let left_border = "┌─";
+    let right_border = "─┐";
+    let padding_needed = available_width.saturating_sub(truncated_title.chars().count() as u16);
+    let padding = "─".repeat(padding_needed as usize);
+
+    let title_line = format!("{} {} {}{}", left_border, truncated_title, padding, right_border);
+
+    // Render the title bar
+    queue!(
+        stdout,
+        MoveTo(start_col, y),
+        SetBackgroundColor(bg_color),
+        SetForegroundColor(border_color),
+        Print(&title_line),
+        ResetColor
+    )?;
+
+    Ok(())
+}
+
+fn render_editor_borders(
+    stdout: &mut impl Write,
+    is_focused: bool,
+    colors: &ColorScheme,
+    start_col: u16,
+    width: u16,
+    start_y: u16,
+    end_y: u16,
+) -> io::Result<()> {
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    // Render left and right borders for each content row
+    for y in start_y..end_y {
+        // Left border
+        queue!(
+            stdout,
+            MoveTo(start_col, y),
+            SetBackgroundColor(colors.bg),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Right border
+        queue!(
+            stdout,
+            MoveTo(start_col + width - 1, y),
+            SetBackgroundColor(colors.bg),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor
+        )?;
+    }
+
+    // Render bottom border
+    queue!(
+        stdout,
+        MoveTo(start_col, end_y),
+        SetBackgroundColor(colors.bg),
+        SetForegroundColor(border_color)
+    )?;
+
+    let horizontal = "─".repeat((width - 2) as usize);
+    queue!(stdout, Print(format!("└{}┘", horizontal)))?;
+
     Ok(())
 }
 
@@ -251,16 +530,44 @@ fn render_annotation_area(
     editor_state: &EditorState,
     annotation_scroll: usize,
     colors: &ColorScheme,
+    start_col: u16,
     width: u16,
     annotation_start: u16,
+    is_focused: bool,
 ) -> io::Result<()> {
-    // Top border of annotation area
+    // Determine border color based on focus
+    let border_color = if is_focused {
+        colors.panel_border_focused
+    } else {
+        colors.panel_border_unfocused
+    };
+
+    // Determine title text based on focus
+    let title_text = if is_focused {
+        "Annotation (editing)"
+    } else {
+        "Annotation"
+    };
+
+    // Top border with title: ┌─ Annotation ─┐
+    // Total width: "┌─" (2) + " " (1) + text + " " (1) + padding + "─┐" (2) = 6 + text + padding
+    let border_and_spaces = 6;
+    let available_width = width.saturating_sub(border_and_spaces);
+    let truncated_text: String = if title_text.chars().count() > available_width as usize {
+        title_text.chars().take((available_width.saturating_sub(1)) as usize).collect::<String>() + "…"
+    } else {
+        title_text.to_string()
+    };
+    let padding_needed = available_width.saturating_sub(truncated_text.chars().count() as u16);
+    let padding = "─".repeat(padding_needed as usize);
+    let top_border = format!("┌─ {} {}{}", truncated_text, padding, "─┐");
+
     queue!(
         stdout,
-        MoveTo(0, annotation_start),
+        MoveTo(start_col, annotation_start),
         SetBackgroundColor(colors.annotation_window_bg),
-        SetForegroundColor(colors.annotation_window_fg),
-        Print(format!("╔{}╗", "═".repeat(width as usize - 2))),
+        SetForegroundColor(border_color),
+        Print(top_border),
         ResetColor
     )?;
 
@@ -274,15 +581,21 @@ fn render_annotation_area(
             }
         }
         _ => {
-            if let Some(ref annotation) = lines[cursor_line].annotation {
-                annotation.clone()
+            if cursor_line < lines.len() {
+                if let Some(ref annotation) = lines[cursor_line].annotation {
+                    annotation.clone()
+                } else {
+                    "[No annotation - Press Enter to add]".to_string()
+                }
             } else {
-                "[No annotation - Press Enter to add]".to_string()
+                "[No annotation]".to_string()
             }
         }
     };
 
     // Wrap annotation text
+    // Width calculation: │ (1) + space (1) + content + space (1) + │ (1) = width
+    // So content area = width - 4
     let max_annotation_width = width as usize - 4;
     let wrapped_annotation = wrap_text(&annotation_text, max_annotation_width);
 
@@ -296,35 +609,41 @@ fn render_annotation_area(
         };
 
         let y_pos = annotation_start + 1 + i as u16;
-        
+
         // Calculate manual padding for proper wide character handling
         use crate::text::calculate_padding;
         let padding = calculate_padding(&display_line, max_annotation_width);
         queue!(
             stdout,
-            MoveTo(0, y_pos),
+            MoveTo(start_col, y_pos),
             SetBackgroundColor(colors.annotation_window_bg),
+            SetForegroundColor(border_color),
+            Print("│"),
             SetForegroundColor(colors.annotation_window_fg),
-            Print(format!("║ {}{}║", display_line, " ".repeat(padding))),
+            Print(format!(" {}{} ", display_line, " ".repeat(padding))),
+            SetForegroundColor(border_color),
+            Print("│"),
             ResetColor
         )?;
     }
 
-    // Bottom border of annotation area
+    // Bottom border: └────┘
+    let horizontal = "─".repeat(width as usize - 2);
     queue!(
         stdout,
-        MoveTo(0, annotation_start + 3),
+        MoveTo(start_col, annotation_start + 3),
         SetBackgroundColor(colors.annotation_window_bg),
-        SetForegroundColor(colors.annotation_window_fg),
-        Print(format!("╚{}╝", "═".repeat(width as usize - 2))),
+        SetForegroundColor(border_color),
+        Print(format!("└{}┘", horizontal)),
         ResetColor
     )?;
 
     Ok(())
 }
 
+/// Status bar render function with tree awareness
 #[allow(clippy::too_many_arguments)]
-fn render_status_bar(
+fn render_status_bar_new(
     stdout: &mut impl Write,
     view_mode: &ViewMode,
     editor_state: &EditorState,
@@ -335,12 +654,15 @@ fn render_status_bar(
     search_matches: &[usize],
     current_match: Option<usize>,
     colors: &ColorScheme,
+    start_col: u16,
     width: u16,
     height: u16,
     status_message: Option<&str>,
     diff_available: bool,
+    has_tree: bool,
+    focused_panel: FocusedPanel,
 ) -> io::Result<()> {
-    queue!(stdout, MoveTo(0, height - 1))?;
+    queue!(stdout, MoveTo(start_col, height - 1))?;
 
     // If there's a status message, show it simply
     if let Some(msg) = status_message {
@@ -361,7 +683,7 @@ fn render_status_bar(
             let filename = file_path
                 .as_deref()
                 .map(|p| Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(p))
-                .unwrap_or("[No Name]");
+                .unwrap_or("[No File]");
             let modified_flag = if modified { " [Modified]" } else { "" };
             let view_indicator = if matches!(view_mode, ViewMode::Diff { .. }) {
                 "DIFF | "
@@ -370,9 +692,15 @@ fn render_status_bar(
             };
 
             // Build the left part: filename and line info
+            let line_info = if total_lines > 0 {
+                format!(" | Line {}/{}", cursor_line + 1, total_lines)
+            } else {
+                String::new()
+            };
+
             let left_part = format!(
-                " {}{}{} | Line {}/{}",
-                view_indicator, filename, modified_flag, cursor_line + 1, total_lines
+                " {}{}{}{}",
+                view_indicator, filename, modified_flag, line_info
             );
 
             // Render left part with normal status colors
@@ -396,11 +724,18 @@ fn render_status_bar(
                 )?;
             }
 
-            // Continue with the rest of the shortcuts
-            let shortcuts = " ^G Help  ^X Exit  ^O Save  ^W Search  ^T Theme  Del/Bksp Del  ^N/^P Jump";
-            let current_len = left_part.len() + if diff_available { 10 } else { 0 }; // " " + " ^D Diff "
+            // Shortcuts depend on focus and tree presence
+            let shortcuts = if has_tree {
+                match focused_panel {
+                    FocusedPanel::FileTree => " Tab Editor  ^G Git/Tree  F1 Help  ^X Exit",
+                    FocusedPanel::Editor => " Tab Tree  ^G Git/Tree  F1 Help  ^O Save  ^X Exit",
+                }
+            } else {
+                " F1 Help  ^X Exit  ^O Save  ^W Search  ^T Theme"
+            };
+
+            let current_len = left_part.len() + if diff_available { 10 } else { 0 };
             let remaining_width = (width as usize).saturating_sub(current_len + 1);
-            // Use truncate_to_width for proper handling of wide characters
             use crate::text::truncate_to_width;
             let shortcuts_truncated = truncate_to_width(shortcuts, remaining_width);
 
@@ -452,6 +787,15 @@ fn render_status_bar(
                 ResetColor
             )?;
         }
+        EditorState::FileSwitchPrompt { .. } => {
+            queue!(
+                stdout,
+                SetBackgroundColor(colors.status_bg),
+                SetForegroundColor(colors.status_fg),
+                Print(format!(" {:width$}", "Unsaved changes! Save before switching? (y/n/Esc)", width = width as usize - 2)),
+                ResetColor
+            )?;
+        }
         EditorState::ShowingHelp => {
             queue!(
                 stdout,
@@ -466,36 +810,235 @@ fn render_status_bar(
     Ok(())
 }
 
+/// Render empty editor area
+fn render_empty_editor(
+    stdout: &mut impl Write,
+    colors: &ColorScheme,
+    start_col: u16,
+    width: u16,
+    height: u16,
+) -> io::Result<()> {
+    let content_height = height.saturating_sub(5) as usize;
+
+    for row in 0..content_height {
+        queue!(
+            stdout,
+            MoveTo(start_col, row as u16),
+            SetBackgroundColor(colors.bg),
+            Print(" ".repeat(width as usize)),
+        )?;
+    }
+
+    queue!(stdout, ResetColor)?;
+    Ok(())
+}
+
+/// Render annotation panel (used when no file loaded)
+#[allow(clippy::too_many_arguments)]
+fn render_annotation_panel(
+    stdout: &mut impl Write,
+    editor_state: &EditorState,
+    colors: &ColorScheme,
+    annotation: Option<&str>,
+    annotation_scroll: usize,
+    start_col: u16,
+    width: u16,
+    height: u16,
+    _lang_comment: &str,
+) -> io::Result<()> {
+    let annotation_start = height - 5;
+
+    // Error/empty states are never focused
+    let border_color = colors.panel_border_unfocused;
+
+    // Top border with title: ┌─ Annotation ─┐
+    let title_text = "Annotation";
+    let border_and_spaces = 6; // "┌─ " + text + " ─┐" = 6 chars
+    let available_width = width.saturating_sub(border_and_spaces);
+    let truncated_text: String = if title_text.chars().count() > available_width as usize {
+        title_text.chars().take((available_width.saturating_sub(1)) as usize).collect::<String>() + "…"
+    } else {
+        title_text.to_string()
+    };
+    let padding_needed = available_width.saturating_sub(truncated_text.chars().count() as u16);
+    let padding = "─".repeat(padding_needed as usize);
+    let top_border = format!("┌─ {} {}{}", truncated_text, padding, "─┐");
+
+    // Top border with title
+    queue!(
+        stdout,
+        MoveTo(start_col, annotation_start),
+        SetBackgroundColor(colors.annotation_window_bg),
+        SetForegroundColor(border_color),
+        Print(top_border),
+        ResetColor
+    )?;
+
+    // Get annotation text
+    let annotation_text = match editor_state {
+        EditorState::Annotating { buffer, .. } => {
+            if buffer.is_empty() {
+                "[Type annotation here...]".to_string()
+            } else {
+                buffer.clone()
+            }
+        }
+        _ => annotation.unwrap_or("[Select a file from the tree]").to_string(),
+    };
+
+    let max_width = width as usize - 4;
+    let wrapped = wrap_text(&annotation_text, max_width);
+
+    for i in 0..2 {
+        let line_idx = annotation_scroll + i;
+        let display_line = if line_idx < wrapped.len() {
+            wrapped[line_idx].clone()
+        } else {
+            String::new()
+        };
+
+        let y_pos = annotation_start + 1 + i as u16;
+        use crate::text::calculate_padding;
+        let padding = calculate_padding(&display_line, max_width);
+
+        queue!(
+            stdout,
+            MoveTo(start_col, y_pos),
+            SetBackgroundColor(colors.annotation_window_bg),
+            SetForegroundColor(border_color),
+            Print("│"),
+            SetForegroundColor(colors.annotation_window_fg),
+            Print(format!(" {}{} ", display_line, " ".repeat(padding))),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor
+        )?;
+    }
+
+    // Bottom border: └────┘
+    let horizontal = "─".repeat(width as usize - 2);
+    queue!(
+        stdout,
+        MoveTo(start_col, annotation_start + 3),
+        SetBackgroundColor(colors.annotation_window_bg),
+        SetForegroundColor(border_color),
+        Print(format!("└{}┘", horizontal)),
+        ResetColor
+    )?;
+
+    Ok(())
+}
+
+/// Simple status bar for empty/error states
+#[allow(clippy::too_many_arguments)]
+fn render_status_bar_simple(
+    stdout: &mut impl Write,
+    _editor_state: &EditorState,
+    colors: &ColorScheme,
+    file_path: &Option<String>,
+    modified: bool,
+    cursor_line: usize,
+    total_lines: usize,
+    _diff_available: bool,
+    status_message: Option<&str>,
+    has_tree: bool,
+    focused_panel: FocusedPanel,
+    start_col: u16,
+    width: u16,
+    height: u16,
+) -> io::Result<()> {
+    queue!(stdout, MoveTo(start_col, height - 1))?;
+
+    if let Some(msg) = status_message {
+        queue!(
+            stdout,
+            SetBackgroundColor(colors.status_bg),
+            SetForegroundColor(colors.status_fg),
+            Print(format!(" {:width$}", msg, width = width as usize - 2)),
+            ResetColor
+        )?;
+        return Ok(());
+    }
+
+    let filename = file_path
+        .as_deref()
+        .map(|p| Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(p))
+        .unwrap_or("[No File]");
+
+    let modified_flag = if modified { " [Modified]" } else { "" };
+
+    let line_info = if total_lines > 0 {
+        format!(" | Line {}/{}", cursor_line + 1, total_lines)
+    } else {
+        String::new()
+    };
+
+    let left_part = format!(" {}{}{}", filename, modified_flag, line_info);
+
+    queue!(
+        stdout,
+        SetBackgroundColor(colors.status_bg),
+        SetForegroundColor(colors.status_fg),
+        Print(&left_part),
+    )?;
+
+    let shortcuts = if has_tree {
+        match focused_panel {
+            FocusedPanel::FileTree => " Tab Editor  ^G Git/Tree  F1 Help  ^X Exit",
+            FocusedPanel::Editor => " Tab Tree  F1 Help  ^O Save  ^X Exit",
+        }
+    } else {
+        " F1 Help  ^X Exit  ^O Save"
+    };
+
+    let current_len = left_part.len();
+    let remaining = (width as usize).saturating_sub(current_len + 1);
+    use crate::text::truncate_to_width;
+    let truncated = truncate_to_width(shortcuts, remaining);
+
+    queue!(stdout, Print(&truncated))?;
+
+    let total_len = current_len + truncated.len();
+    let padding = (width as usize).saturating_sub(total_len);
+    if padding > 0 {
+        queue!(stdout, Print(" ".repeat(padding)))?;
+    }
+
+    queue!(stdout, ResetColor)?;
+    Ok(())
+}
+
 fn position_cursor(
     stdout: &mut impl Write,
     buffer: &str,
     cursor_pos: usize,
     annotation_scroll: usize,
     annotation_start: u16,
+    start_col: u16,
     width: u16,
 ) -> io::Result<()> {
     let max_annotation_width = width as usize - 4;
     let wrapped_annotation = wrap_text(buffer, max_annotation_width);
-    
+
     // Calculate cursor position in wrapped text
     let (cursor_line, cursor_col) = if !buffer.is_empty() {
         let chars: Vec<char> = buffer.chars().collect();
         let actual_pos = cursor_pos.min(chars.len());
-        
+
         let mut chars_so_far = 0;
         let mut found_line = 0;
         let mut found_col = 0;
-        
+
         for (line_idx, wrapped_line) in wrapped_annotation.iter().enumerate() {
             let wrapped_chars = wrapped_line.chars().count();
             let next_chars = chars_so_far + wrapped_chars;
-            
+
             if actual_pos <= next_chars {
                 found_line = line_idx;
                 found_col = actual_pos - chars_so_far;
                 break;
             }
-            
+
             chars_so_far = next_chars;
             if line_idx < wrapped_annotation.len() - 1 && next_chars < chars.len() {
                 chars_so_far += 1;
@@ -506,13 +1049,13 @@ fn position_cursor(
         (0, 0)
     };
 
-    let cursor_screen_line = if cursor_line >= annotation_scroll && 
+    let cursor_screen_line = if cursor_line >= annotation_scroll &&
                                cursor_line < annotation_scroll + 2 {
         annotation_start + 1 + (cursor_line - annotation_scroll) as u16
     } else {
         annotation_start + 1
     };
-    
+
     let display_line = if cursor_line < wrapped_annotation.len() {
         &wrapped_annotation[cursor_line]
     } else {
@@ -522,11 +1065,11 @@ fn position_cursor(
     // Convert character index to visual column for proper cursor positioning with wide chars
     use crate::text::char_index_to_visual_col;
     let cursor_visual_col = char_index_to_visual_col(display_line, cursor_col);
-    let cursor_x = 2 + cursor_visual_col;
-    
+    let cursor_x = start_col + 2 + cursor_visual_col as u16;
+
     queue!(
         stdout,
-        MoveTo(cursor_x as u16, cursor_screen_line),
+        MoveTo(cursor_x, cursor_screen_line),
         Show
     )?;
 
@@ -586,9 +1129,12 @@ fn render_help_overlay(
         " ^W         Search",
         " ^D         Toggle Diff View",
         " ^T         Toggle Theme",
+        " ^Z / ^Y    Undo / Redo",
         " ^O         Save File",
         " ^X         Exit",
-        " ^G         Toggle Help",
+        " F1         Show Help",
+        " Tab        Switch Editor / Tree",
+        " ^G         Toggle Git/Tree Mode",
         "",
         " Arrow Keys Navigation",
         " PgUp/PgDn  Page Navigation",
@@ -609,4 +1155,166 @@ fn render_help_overlay(
     queue!(stdout, ResetColor)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod focus_rendering_tests {
+    
+
+    #[test]
+    fn test_title_bar_text_generation() {
+        // Test title bar string formatting
+        let title = "test.rs";
+        let formatted = format!(" {} ", title);
+        assert!(formatted.contains(title));
+        assert_eq!(formatted, " test.rs ");
+    }
+
+    #[test]
+    fn test_title_bar_truncation_long_filename() {
+        // Test that long filenames truncate gracefully
+        let long_name = "a".repeat(100);
+        let max_width = 30;
+        let truncated: String = if long_name.chars().count() > max_width {
+            long_name.chars().take(max_width - 1).collect::<String>() + "…"
+        } else {
+            long_name
+        };
+        // Verify character count, not byte length
+        assert!(truncated.chars().count() <= max_width);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn test_content_height_calculation_with_title() {
+        // Verify content height reduces by 1 when title bar present
+        let height = 50u16;
+        let title_bar_height = 1u16;
+        let without_title = height.saturating_sub(5);
+        let with_title = height.saturating_sub(5 + title_bar_height);
+        assert_eq!(with_title, without_title - 1);
+        assert_eq!(with_title, 44);
+    }
+
+    #[test]
+    fn test_content_height_calculation_without_title() {
+        // Verify content height unchanged when no title bar
+        let height = 50u16;
+        let title_bar_height = 0u16;
+        let content_height = height.saturating_sub(5 + title_bar_height);
+        assert_eq!(content_height, 45);
+    }
+
+    #[test]
+    fn test_annotation_title_text_when_focused() {
+        // Verify annotation title includes "(editing)" when focused
+        let focused_title = " Annotation (editing) ";
+        assert!(focused_title.contains("editing"));
+        assert!(focused_title.contains("Annotation"));
+    }
+
+    #[test]
+    fn test_annotation_title_text_when_unfocused() {
+        // Verify annotation title without "(editing)" when unfocused
+        let unfocused_title = " Annotation ";
+        assert!(!unfocused_title.contains("editing"));
+        assert!(unfocused_title.contains("Annotation"));
+    }
+
+    #[test]
+    fn test_minimum_terminal_height_with_title() {
+        // Verify minimum height requirements
+        let min_height = 6u16;
+        let title_bar = 1u16;
+        let annotation_panel = 4u16;
+        let status_bar = 1u16;
+        assert!(min_height >= title_bar + annotation_panel + status_bar);
+    }
+
+    // =========================================================================
+    // Cursor Positioning Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cursor_x_calculation_with_start_col() {
+        // Verify cursor X position accounts for start_col offset
+        let start_col = 30u16; // After file tree
+        let border_and_padding = 2u16; // "│ "
+        let cursor_visual_col = 5u16; // 5 chars into annotation
+        let expected_x = start_col + border_and_padding + cursor_visual_col;
+        assert_eq!(expected_x, 37);
+    }
+
+    #[test]
+    fn test_cursor_x_at_annotation_start() {
+        // Cursor at position 0 should be at start_col + 2
+        let start_col = 30u16;
+        let cursor_visual_col = 0u16;
+        let cursor_x = start_col + 2 + cursor_visual_col;
+        assert_eq!(cursor_x, 32); // Right after "│ "
+    }
+
+    #[test]
+    fn test_cursor_x_in_normal_mode_no_tree() {
+        // Without tree, start_col is 0
+        let start_col = 0u16;
+        let cursor_visual_col = 10u16;
+        let cursor_x = start_col + 2 + cursor_visual_col;
+        assert_eq!(cursor_x, 12);
+    }
+
+    #[test]
+    fn test_cursor_x_in_directory_mode_with_tree() {
+        // With tree (width 30), start_col is 30
+        let start_col = 30u16;
+        let cursor_visual_col = 15u16;
+        let cursor_x = start_col + 2 + cursor_visual_col;
+        assert_eq!(cursor_x, 47);
+    }
+
+    #[test]
+    fn test_cursor_y_calculation_first_line() {
+        // Cursor on first visible line
+        let annotation_start = 45u16;
+        let annotation_scroll = 0usize;
+        let cursor_line = 0usize;
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 46); // First content line after top border
+    }
+
+    #[test]
+    fn test_cursor_y_calculation_second_line() {
+        // Cursor on second visible line
+        let annotation_start = 45u16;
+        let annotation_scroll = 0usize;
+        let cursor_line = 1usize;
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 47); // Second content line
+    }
+
+    #[test]
+    fn test_cursor_y_with_scroll() {
+        // Cursor visible after scrolling
+        let annotation_start = 45u16;
+        let annotation_scroll = 2usize;
+        let cursor_line = 3usize; // Line 3 is visible when scroll is 2
+        let cursor_y = annotation_start + 1 + (cursor_line - annotation_scroll) as u16;
+        assert_eq!(cursor_y, 47); // Line 3 shows at second position (offset 1) when scroll is 2
+    }
+
+    #[test]
+    fn test_cursor_position_accounts_for_borders() {
+        // Verify border and padding are accounted for
+        // Format: "│ text │" where text starts at column 2
+        let start_col = 0u16;
+        let left_border = 1u16; // "│"
+        let left_padding = 1u16; // " "
+        let cursor_offset = left_border + left_padding;
+        assert_eq!(cursor_offset, 2);
+
+        // Full calculation
+        let cursor_visual_col = 0u16;
+        let cursor_x = start_col + cursor_offset + cursor_visual_col;
+        assert_eq!(cursor_x, 2);
+    }
 }

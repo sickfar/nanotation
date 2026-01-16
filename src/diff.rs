@@ -108,8 +108,15 @@ pub fn tokenize_line(line: &str) -> Vec<&str> {
                 // Check if this is the second char of a double operator (skip it)
                 let prev_token = tokens.last();
                 let is_second_of_double = prev_token.map(|t| {
-                    let bytes = t.as_bytes();
-                    bytes.len() == 2 && line[i..].starts_with(&t[1..])
+                    // Double operators like ==, ->, etc. have exactly 2 ASCII characters
+                    // Check char count (not byte count) and that second char matches
+                    let mut chars = t.chars();
+                    if let (Some(_first), Some(second)) = (chars.next(), chars.next()) {
+                        // Must be exactly 2 chars and no more
+                        chars.next().is_none() && second == c
+                    } else {
+                        false
+                    }
                 }).unwrap_or(false);
 
                 if !is_second_of_double {
@@ -494,6 +501,21 @@ mod tokenize_tests {
     #[test]
     fn test_tokenize_numbers() {
         assert_eq!(tokenize_line("x = 123"), vec!["x", "=", "123"]);
+    }
+
+    #[test]
+    fn test_tokenize_utf8_cyrillic() {
+        // Regression test: UTF-8 characters should not cause panics
+        // 'Ч' is a 2-byte UTF-8 character - should not be confused with 2-char operators
+        assert_eq!(tokenize_line("Ч"), vec!["Ч"]);
+        assert_eq!(tokenize_line("Привет мир"), vec!["Привет", "мир"]);
+    }
+
+    #[test]
+    fn test_tokenize_utf8_mixed() {
+        // Mix of ASCII operators and UTF-8 text
+        assert_eq!(tokenize_line("x == Ч"), vec!["x", "==", "Ч"]);
+        assert_eq!(tokenize_line("Ч -> Щ"), vec!["Ч", "->", "Щ"]);
     }
 }
 
