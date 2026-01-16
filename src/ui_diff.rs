@@ -1,9 +1,9 @@
 //! Diff mode UI rendering module.
 
-use crate::diff::{ChangeType, DiffResult, LineChange, WordChange};
+use crate::diff::{ChangeType, DiffResult, LineChange};
 use crate::highlighting::{to_crossterm_color, SyntaxHighlighter};
 use crate::models::{EditorState, FocusedPanel, Line};
-use crate::text::wrap_text;
+use crate::text::{wrap_text, wrap_styled_text};
 use crate::theme::{ColorScheme, Theme};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -14,6 +14,279 @@ use crossterm::{
 use std::io::{self, Write};
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
+
+/// Represents a wrapped line in a diff pane with rendering info
+struct WrappedPaneLine {
+    line_num: Option<usize>,
+    styled_segments: Vec<(crossterm::style::Color, crossterm::style::Color, String)>, // (fg, bg, text)
+    default_bg: Color,
+}
+
+/// Wraps content for a single diff pane, returning wrapped lines with styling
+#[allow(clippy::too_many_arguments)]
+fn wrap_diff_pane_content(
+    line_data: &Option<(usize, String, LineChange)>,
+    content_width: usize,
+    _gutter_width: usize,
+    is_left_pane: bool,
+    colors: &ColorScheme,
+    highlighter: &SyntaxHighlighter,
+    extension: &str,
+    lines: &[Line],
+    is_cursor_line: bool,
+) -> Vec<WrappedPaneLine> {
+    match line_data {
+        Some((line_num, content, change)) => {
+            // Determine background color
+            let (line_bg, _word_added_bg, _word_removed_bg) = get_diff_colors(change, is_cursor_line, is_left_pane, colors);
+
+            // Check if line has annotation
+            let has_annotation = if is_left_pane && *line_num > 0 && *line_num <= lines.len() {
+                lines[*line_num - 1].annotation.is_some()
+            } else {
+                false
+            };
+
+            let line_bg = if has_annotation && is_cursor_line {
+                colors.annotated_selected_bg
+            } else if has_annotation {
+                colors.annotated_bg
+            } else {
+                line_bg
+            };
+
+            // Handle word-level diff for modified lines
+            if let LineChange::Modified { words, old_leading_ws: _, new_leading_ws: _ } = change {
+                // Create styled segments with word-level diff colors
+                let word_added_bg = colors.diff_added_word_bg;
+                let word_removed_bg = colors.diff_removed_word_bg;
+                let word_added_fg = colors.diff_added_word_fg;
+                let word_removed_fg = colors.diff_removed_word_fg;
+
+                // NEW APPROACH: Use original content as-is, map word changes to positions
+                // Step 1: Map word changes to character positions in the original content
+                let change_positions = map_word_changes_to_positions(content, words, is_left_pane);
+
+                // Step 2: Apply syntax highlighting to the original content (preserves spacing)
+                let syntax_highlighted = highlighter.highlight(content, extension);
+
+                // Step 3: Create styled segments by merging syntax highlighting with word-level diff colors
+                let mut styled_segments = Vec::new();
+                let mut current_char = 0;
+
+                for (syntax_style, syntax_text) in syntax_highlighted {
+                    let syntax_fg = to_crossterm_color(syntax_style.foreground);
+                    let syntax_len = syntax_text.chars().count();
+                    let syntax_start = current_char;
+                    let syntax_end = current_char + syntax_len;
+
+                    // Check if this syntax segment overlaps with any changed word
+                    let mut overlaps = Vec::new();
+                    for (word_start, word_end, change_type) in &change_positions {
+                        let overlap_start = syntax_start.max(*word_start);
+                        let overlap_end = syntax_end.min(*word_end);
+                        if overlap_start < overlap_end {
+                            overlaps.push((overlap_start, overlap_end, change_type));
+                        }
+                    }
+
+                    if overlaps.is_empty() {
+                        // No overlap with changed words - use default syntax colors
+                        styled_segments.push((syntax_fg, line_bg, syntax_text.to_string()));
+                    } else {
+                        // Split segment based on overlaps
+                        let chars: Vec<char> = syntax_text.chars().collect();
+                        let mut segment_pos = syntax_start;
+
+                        for (overlap_start, overlap_end, change_type) in overlaps {
+                            // Add unchanged portion before overlap (if any)
+                            if segment_pos < overlap_start {
+                                let local_start = segment_pos.saturating_sub(syntax_start);
+                                let local_end = overlap_start.saturating_sub(syntax_start);
+                                let text: String = chars[local_start..local_end].iter().collect();
+                                styled_segments.push((syntax_fg, line_bg, text));
+                            }
+
+                            // Add changed portion
+                            let local_start = overlap_start.saturating_sub(syntax_start);
+                            let local_end = overlap_end.saturating_sub(syntax_start);
+                            let text: String = chars[local_start..local_end].iter().collect();
+
+                            let (fg, bg) = match change_type {
+                                ChangeType::Added => (word_added_fg, word_added_bg),
+                                ChangeType::Removed => (word_removed_fg, word_removed_bg),
+                                ChangeType::Unchanged => (syntax_fg, line_bg),
+                            };
+                            styled_segments.push((fg, bg, text));
+
+                            segment_pos = overlap_end;
+                        }
+
+                        // Add any remaining unchanged portion after last overlap
+                        if segment_pos < syntax_end {
+                            let local_start = segment_pos.saturating_sub(syntax_start);
+                            let local_end = syntax_len;
+                            let text: String = chars[local_start..local_end].iter().collect();
+                            styled_segments.push((syntax_fg, line_bg, text));
+                        }
+                    }
+
+                    current_char = syntax_end;
+                }
+
+                // Step 4: Wrap the styled segments
+                let wrapped_input: Vec<(Color, &str)> = styled_segments.iter()
+                    .map(|(fg, _bg, text)| (*fg, text.as_str()))
+                    .collect();
+                let wrapped = wrap_styled_text(&wrapped_input, content_width);
+
+                // Step 5: Reconstruct segments with background colors after wrapping
+                wrapped.into_iter().enumerate().map(|(idx, segments)| {
+                    let mut result_segments = Vec::new();
+                    let mut segment_offset = 0;
+
+                    for (fg, text) in segments {
+                        // Find the corresponding original segment to get the background color
+                        let char_count = text.chars().count();
+                        let mut current_offset = 0;
+                        let mut found_bg = line_bg;
+
+                        for (_orig_fg, orig_bg, orig_text) in &styled_segments {
+                            let orig_len = orig_text.chars().count();
+                            if current_offset <= segment_offset && segment_offset < current_offset + orig_len {
+                                found_bg = *orig_bg;
+                                break;
+                            }
+                            current_offset += orig_len;
+                        }
+
+                        result_segments.push((fg, found_bg, text));
+                        segment_offset += char_count;
+                    }
+
+                    WrappedPaneLine {
+                        line_num: if idx == 0 { Some(*line_num) } else { None },
+                        styled_segments: result_segments,
+                        default_bg: line_bg,
+                    }
+                }).collect()
+            } else {
+                // Simple highlight for added/removed/unchanged lines
+                let styled_spans = highlighter.highlight(content, extension);
+                let wrapped = wrap_styled_text(&styled_spans, content_width);
+
+                wrapped.into_iter().enumerate().map(|(idx, segments)| {
+                    WrappedPaneLine {
+                        line_num: if idx == 0 { Some(*line_num) } else { None },
+                        styled_segments: segments.into_iter().map(|(style, text)| {
+                            (to_crossterm_color(style.foreground), line_bg, text)
+                        }).collect(),
+                        default_bg: line_bg,
+                    }
+                }).collect()
+            }
+        }
+        None => {
+            // Blank line
+            vec![WrappedPaneLine {
+                line_num: None,
+                styled_segments: vec![],
+                default_bg: colors.bg,
+            }]
+        }
+    }
+}
+
+/// Renders a single wrapped line from a diff pane
+fn render_wrapped_pane_line(
+    stdout: &mut impl Write,
+    wrapped_line: &WrappedPaneLine,
+    start_x: u16,
+    gutter_width: usize,
+    content_width: usize,
+    y: u16,
+    show_gutter: bool,
+) -> io::Result<()> {
+    queue!(stdout, MoveTo(start_x, y))?;
+
+    // Render gutter
+    if show_gutter {
+        if let Some(line_num) = wrapped_line.line_num {
+            let line_num_str = format!("{:>width$} ", line_num, width = gutter_width - 1);
+            queue!(
+                stdout,
+                SetBackgroundColor(Color::Reset),
+                SetForegroundColor(Color::DarkGrey),
+                Print(&line_num_str),
+            )?;
+        } else {
+            // Blank gutter for wrapped continuation lines
+            let blank_gutter = format!("{:>width$} ", "", width = gutter_width - 1);
+            queue!(
+                stdout,
+                SetBackgroundColor(Color::Reset),
+                Print(&blank_gutter),
+            )?;
+        }
+    } else {
+        // Show blank gutter for None lines
+        let blank_gutter = format!("{:>width$} ", "~", width = gutter_width - 1);
+        queue!(
+            stdout,
+            SetBackgroundColor(Color::Reset),
+            SetForegroundColor(Color::DarkGrey),
+            Print(&blank_gutter),
+        )?;
+    }
+
+    // Render styled segments with per-segment background colors
+    let mut current_width = 0;
+    for (fg, bg, text) in &wrapped_line.styled_segments {
+        if current_width >= content_width {
+            break;
+        }
+        queue!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(*bg),
+            SetForegroundColor(*fg),
+            Print(text),
+        )?;
+        current_width += text.width();
+    }
+
+    // Padding with default background
+    let padding = content_width.saturating_sub(current_width);
+    if padding > 0 {
+        queue!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(wrapped_line.default_bg),
+            Print(format!("{:width$}", "", width = padding)),
+        )?;
+    }
+
+    queue!(stdout, ResetColor)?;
+    Ok(())
+}
+
+/// Renders an empty pane line for padding
+fn render_empty_pane_line(
+    stdout: &mut impl Write,
+    start_x: u16,
+    width: usize,
+    colors: &ColorScheme,
+    y: u16,
+) -> io::Result<()> {
+    queue!(
+        stdout,
+        MoveTo(start_x, y),
+        SetBackgroundColor(colors.bg),
+        Print(format!("{:width$}", "", width = width)),
+        ResetColor
+    )?;
+    Ok(())
+}
 
 /// Renders the editor in diff mode with split panes.
 /// Now accepts EditorState to properly handle annotation editing, help, etc.
@@ -98,7 +371,7 @@ pub fn render_diff_mode(
         colors.panel_border_unfocused
     };
 
-    // Render diff content
+    // Render diff content with word wrapping
     while screen_line < content_height && diff_line_idx < diff_result.lines.len() {
         let diff_line = &diff_result.lines[diff_line_idx];
 
@@ -109,69 +382,127 @@ pub fn render_diff_mode(
             .map(|(n, _, _)| *n == cursor_line + 1)
             .unwrap_or(false);
 
-        // Calculate Y position (+1 to account for title bar at Y=0)
-        let y_pos = screen_line as u16 + 1;
-
-        // Render left border
-        queue!(
-            stdout,
-            MoveTo(start_col, y_pos),
-            SetForegroundColor(border_color),
-            Print("│"),
-            ResetColor
-        )?;
-
-        // Render left pane (working copy) - offset by 1 for left border
-        render_diff_pane_line(
-            &mut stdout,
+        // Wrap content for both panes
+        let left_wrapped = wrap_diff_pane_content(
             &diff_line.working,
-            start_col + 1, // +1 for left border
+            left_content_width.saturating_sub(1),
             left_gutter_width,
-            left_content_width.saturating_sub(1), // -1 for left border
+            true,
+            &colors,
+            highlighter,
+            extension,
+            lines,
             is_cursor_line,
-            true, // is_left_pane
-            &colors,
-            highlighter,
-            extension,
-            y_pos,
-            lines,
-        )?;
+        );
 
-        // Render separator (matches border style)
-        queue!(
-            stdout,
-            MoveTo(start_col + left_pane_width as u16 + 1, y_pos), // +1 for left border
-            SetForegroundColor(border_color),
-            Print("│"),
-            ResetColor
-        )?;
-
-        // Render right pane (HEAD)
-        render_diff_pane_line(
-            &mut stdout,
+        let right_wrapped = wrap_diff_pane_content(
             &diff_line.head,
-            start_col + (left_pane_width + separator_width) as u16 + 1, // +1 for left border
+            right_content_width.saturating_sub(1),
             right_gutter_width,
-            right_content_width.saturating_sub(1), // -1 for right border
-            false, // cursor is only on left
-            false, // is_left_pane
+            false,
             &colors,
             highlighter,
             extension,
-            y_pos,
             lines,
-        )?;
+            false, // cursor never on right pane
+        );
 
-        // Render right border
-        queue!(
-            stdout,
-            MoveTo(start_col + available_width - 1, y_pos),
-            SetForegroundColor(border_color),
-            Print("│"),
-            ResetColor
-        )?;
+        // Determine how many screen lines this diff line needs
+        let wrapped_line_count = left_wrapped.len().max(right_wrapped.len());
 
-        screen_line += 1;
+        // Render each wrapped line
+        for wrap_idx in 0..wrapped_line_count {
+            if screen_line >= content_height {
+                break;
+            }
+
+            let y_pos = screen_line as u16 + 1;
+
+            // Clear the entire line with background color first
+            queue!(
+                stdout,
+                MoveTo(start_col, y_pos),
+                SetBackgroundColor(colors.bg),
+                Print(format!("{:width$}", "", width = available_width as usize)),
+            )?;
+
+            // Render left border
+            queue!(
+                stdout,
+                MoveTo(start_col, y_pos),
+                SetBackgroundColor(colors.bg),
+                SetForegroundColor(border_color),
+                Print("│"),
+                ResetColor
+            )?;
+
+            // Render left pane wrapped line
+            if wrap_idx < left_wrapped.len() {
+                render_wrapped_pane_line(
+                    &mut stdout,
+                    &left_wrapped[wrap_idx],
+                    start_col + 1,
+                    left_gutter_width,
+                    left_content_width.saturating_sub(1),
+                    y_pos,
+                    wrap_idx == 0, // show gutter only on first line
+                )?;
+            } else {
+                // Empty line (padding)
+                render_empty_pane_line(
+                    &mut stdout,
+                    start_col + 1,
+                    left_pane_width.saturating_sub(1),
+                    &colors,
+                    y_pos,
+                )?;
+            }
+
+            // Render separator
+            queue!(
+                stdout,
+                MoveTo(start_col + left_pane_width as u16 + 1, y_pos),
+                SetBackgroundColor(colors.bg),
+                SetForegroundColor(border_color),
+                Print("│"),
+                ResetColor
+            )?;
+
+            // Render right pane wrapped line
+            if wrap_idx < right_wrapped.len() {
+                render_wrapped_pane_line(
+                    &mut stdout,
+                    &right_wrapped[wrap_idx],
+                    start_col + (left_pane_width + separator_width) as u16 + 1,
+                    right_gutter_width,
+                    right_content_width.saturating_sub(1),
+                    y_pos,
+                    wrap_idx == 0,
+                )?;
+            } else {
+                // Empty line (padding)
+                render_empty_pane_line(
+                    &mut stdout,
+                    start_col + (left_pane_width + separator_width) as u16 + 1,
+                    right_pane_width.saturating_sub(1),
+                    &colors,
+                    y_pos,
+                )?;
+            }
+
+            // Render right border
+            queue!(
+                stdout,
+                MoveTo(start_col + available_width - 1, y_pos),
+                SetBackgroundColor(colors.bg),
+                SetForegroundColor(border_color),
+                Print("│"),
+                ResetColor
+            )?;
+
+            screen_line += 1;
+        }
+
         diff_line_idx += 1;
     }
 
@@ -179,10 +510,19 @@ pub fn render_diff_mode(
     while screen_line < content_height {
         let y_pos = screen_line as u16 + 1;
 
+        // Clear the entire line with background color first (prevents theme switch artifacts)
+        queue!(
+            stdout,
+            MoveTo(start_col, y_pos),
+            SetBackgroundColor(colors.bg),
+            Print(format!("{:width$}", "", width = available_width as usize)),
+        )?;
+
         // Left border
         queue!(
             stdout,
             MoveTo(start_col, y_pos),
+            SetBackgroundColor(colors.bg),
             SetForegroundColor(border_color),
             Print("│"),
             ResetColor
@@ -200,6 +540,7 @@ pub fn render_diff_mode(
         queue!(
             stdout,
             MoveTo(start_col + left_pane_width as u16 + 1, y_pos),
+            SetBackgroundColor(colors.bg),
             SetForegroundColor(border_color),
             Print("│"),
             ResetColor
@@ -217,6 +558,7 @@ pub fn render_diff_mode(
         queue!(
             stdout,
             MoveTo(start_col + available_width - 1, y_pos),
+            SetBackgroundColor(colors.bg),
             SetForegroundColor(border_color),
             Print("│"),
             ResetColor
@@ -232,6 +574,7 @@ pub fn render_diff_mode(
     queue!(
         stdout,
         MoveTo(start_col, border_y),
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print("└"),
         ResetColor
@@ -241,6 +584,7 @@ pub fn render_diff_mode(
     let left_horizontal = "─".repeat(left_pane_width as usize);
     queue!(
         stdout,
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print(&left_horizontal),
         ResetColor
@@ -249,6 +593,7 @@ pub fn render_diff_mode(
     // Middle junction (aligns with content separator)
     queue!(
         stdout,
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print("┴"),
         ResetColor
@@ -261,6 +606,7 @@ pub fn render_diff_mode(
     let right_horizontal = "─".repeat(right_section_width);
     queue!(
         stdout,
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print(&right_horizontal),
         ResetColor
@@ -269,6 +615,7 @@ pub fn render_diff_mode(
     // Right corner
     queue!(
         stdout,
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print("┘"),
         ResetColor
@@ -367,6 +714,7 @@ fn render_unified_diff_title_bar(
     // Left corner
     queue!(
         stdout,
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print("┌"),
         ResetColor
@@ -385,6 +733,7 @@ fn render_unified_diff_title_bar(
         SetBackgroundColor(left_bg),
         SetForegroundColor(left_fg),
         Print(&left_title_with_spaces),
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print(&left_padding),
         ResetColor
@@ -394,6 +743,7 @@ fn render_unified_diff_title_bar(
     // This should align with the content separator at start_col + left_pane_width + 1
     queue!(
         stdout,
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print("┬"),
         ResetColor
@@ -414,6 +764,7 @@ fn render_unified_diff_title_bar(
         SetBackgroundColor(right_bg),
         SetForegroundColor(right_fg),
         Print(&right_title_with_spaces),
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print(&right_padding),
         ResetColor
@@ -422,120 +773,12 @@ fn render_unified_diff_title_bar(
     // Right corner
     queue!(
         stdout,
+        SetBackgroundColor(colors.bg),
         SetForegroundColor(border_color),
         Print("┐"),
         ResetColor
     )?;
 
-    Ok(())
-}
-
-/// Renders a single line in a diff pane.
-#[allow(clippy::too_many_arguments)]
-fn render_diff_pane_line(
-    stdout: &mut impl Write,
-    line_data: &Option<(usize, String, LineChange)>,
-    start_x: u16,
-    gutter_width: usize,
-    content_width: usize,
-    is_cursor_line: bool,
-    is_left_pane: bool,
-    colors: &ColorScheme,
-    highlighter: &SyntaxHighlighter,
-    extension: &str,
-    y: u16,
-    lines: &[Line],
-) -> io::Result<()> {
-    queue!(stdout, MoveTo(start_x, y))?;
-
-    match line_data {
-        Some((line_num, content, change)) => {
-            // Determine background color based on change type and cursor
-            let (line_bg, word_added_bg, word_removed_bg) = get_diff_colors(change, is_cursor_line, is_left_pane, colors);
-
-            // Render gutter
-            let line_num_str = format!("{:>width$} ", line_num, width = gutter_width - 1);
-            queue!(
-                stdout,
-                SetBackgroundColor(colors.bg),
-                SetForegroundColor(colors.line_number_fg),
-                Print(&line_num_str),
-            )?;
-
-            // Check if this line has an annotation (only show on left pane)
-            let has_annotation = if is_left_pane && *line_num > 0 && *line_num <= lines.len() {
-                lines[*line_num - 1].annotation.is_some()
-            } else {
-                false
-            };
-
-            // Adjust background for annotated lines
-            let line_bg = if has_annotation && is_cursor_line {
-                colors.annotated_selected_bg
-            } else if has_annotation {
-                colors.annotated_bg
-            } else {
-                line_bg
-            };
-
-            queue!(stdout, SetBackgroundColor(line_bg))?;
-
-            // Render content with word-level highlighting if modified
-            match change {
-                LineChange::Modified { words, old_leading_ws, new_leading_ws } => {
-                    let leading_ws = if is_left_pane { new_leading_ws } else { old_leading_ws };
-                    render_word_diff(stdout, words, leading_ws, line_bg, word_added_bg, word_removed_bg, is_left_pane, content_width)?;
-                }
-                _ => {
-                    // Simple highlight for added/removed/unchanged lines
-                    let styled_spans = highlighter.highlight(content, extension);
-                    let mut current_width = 0;
-                    for (style, text) in styled_spans {
-                        if current_width >= content_width {
-                            break;
-                        }
-                        let fg = to_crossterm_color(style.foreground);
-                        // Use truncate_to_width for proper wide character handling
-                        use crate::text::truncate_to_width;
-                        let remaining_width = content_width.saturating_sub(current_width);
-                        let text_to_print = truncate_to_width(text, remaining_width);
-                        queue!(
-                            stdout,
-                            SetAttribute(Attribute::Reset),
-                            SetBackgroundColor(line_bg),
-                            SetForegroundColor(fg),
-                            Print(&text_to_print),
-                        )?;
-                        current_width += text_to_print.width();
-                    }
-                    // Padding
-                    let padding = content_width.saturating_sub(current_width);
-                    if padding > 0 {
-                        queue!(
-                            stdout,
-                            SetAttribute(Attribute::Reset),
-                            SetBackgroundColor(line_bg),
-                            Print(format!("{:width$}", "", width = padding)),
-                        )?;
-                    }
-                }
-            }
-        }
-        None => {
-            // Blank line (no corresponding line on this side)
-            // Show empty gutter and blank content
-            let blank_gutter = format!("{:>width$} ", "~", width = gutter_width - 1);
-            queue!(
-                stdout,
-                SetBackgroundColor(colors.bg),
-                SetForegroundColor(Color::DarkGrey),
-                Print(&blank_gutter),
-                Print(format!("{:width$}", "", width = content_width)),
-            )?;
-        }
-    }
-
-    queue!(stdout, ResetColor)?;
     Ok(())
 }
 
@@ -580,7 +823,23 @@ fn get_diff_colors(
             }
         }
         LineChange::Modified { .. } => {
-            (base_bg, colors.diff_added_word_bg, colors.diff_removed_word_bg)
+            // Modified lines get pale background based on which pane
+            let bg = if is_left_pane {
+                // Working copy shows additions - pale green
+                if is_cursor_line {
+                    colors.diff_added_selected_bg
+                } else {
+                    colors.diff_added_bg
+                }
+            } else {
+                // HEAD shows removals - pale red
+                if is_cursor_line {
+                    colors.diff_removed_selected_bg
+                } else {
+                    colors.diff_removed_bg
+                }
+            };
+            (bg, colors.diff_added_word_bg, colors.diff_removed_word_bg)
         }
         LineChange::Unchanged => {
             (base_bg, colors.diff_added_word_bg, colors.diff_removed_word_bg)
@@ -588,93 +847,73 @@ fn get_diff_colors(
     }
 }
 
-/// Render word-level diff with highlighting.
-fn render_word_diff(
-    stdout: &mut impl Write,
-    words: &[WordChange],
-    leading_ws: &str,
-    line_bg: Color,
-    word_added_bg: Color,
-    word_removed_bg: Color,
+/// Maps word changes to their positions in the original content string.
+/// Returns a list of (start_pos, end_pos, change_type) for changed words only.
+/// Unchanged words are not included in the result (they get default syntax highlighting).
+fn map_word_changes_to_positions(
+    content: &str,
+    words: &[crate::diff::WordChange],
     is_left_pane: bool,
-    content_width: usize,
-) -> io::Result<()> {
-    let mut current_width = 0;
+) -> Vec<(usize, usize, ChangeType)> {
+    use crate::diff::tokenize_line;
 
-    // Render leading whitespace first
-    if !leading_ws.is_empty() && current_width < content_width {
-        // Use truncate_to_width for proper wide character handling
-        use crate::text::truncate_to_width;
-        let ws_to_print = truncate_to_width(leading_ws, content_width);
-        queue!(
-            stdout,
-            SetBackgroundColor(line_bg),
-            Print(&ws_to_print),
-        )?;
-        current_width += ws_to_print.width();
+    let content_trimmed = content.trim_start();
+    let leading_ws_len = content.len() - content_trimmed.len();
+    let content_trimmed_end = content_trimmed.trim_end();
+
+    // Tokenize the content to get actual token positions
+    let mut content_tokens = Vec::new();
+    let mut pos = 0;
+    for token in tokenize_line(content_trimmed_end) {
+        // Find this token in the remaining content
+        if let Some(offset) = content_trimmed_end[pos..].find(token) {
+            let start = leading_ws_len + pos + offset;
+            let end = start + token.len();
+            content_tokens.push((token, start, end));
+            pos += offset + token.len();
+        }
     }
 
-    let mut first_word = true;
+    // Build a list of change types for content tokens by matching with words list
+    let mut change_positions = Vec::new();
+    let mut words_idx = 0;
 
-    for word in words {
-        if current_width >= content_width {
-            break;
+    for (token, start, end) in content_tokens {
+        // Find matching word in words list
+        while words_idx < words.len() {
+            let word = &words[words_idx];
+
+            // Check if this word should appear in this pane
+            let should_show = match word.change_type {
+                ChangeType::Unchanged => true,
+                ChangeType::Added => is_left_pane,
+                ChangeType::Removed => !is_left_pane,
+            };
+
+            if !should_show {
+                words_idx += 1;
+                continue;
+            }
+
+            // Match token
+            if word.text == token {
+                // Only record positions for changed words (Added/Removed)
+                // Unchanged words will use default syntax highlighting
+                match word.change_type {
+                    ChangeType::Added | ChangeType::Removed => {
+                        change_positions.push((start, end, word.change_type.clone()));
+                    }
+                    ChangeType::Unchanged => {}
+                }
+                words_idx += 1;
+                break;
+            }
+
+            words_idx += 1;
         }
-
-        // Determine which words to show on each pane
-        let should_show = match word.change_type {
-            ChangeType::Unchanged => true,
-            ChangeType::Added => is_left_pane,    // Added words only on left (working)
-            ChangeType::Removed => !is_left_pane, // Removed words only on right (HEAD)
-        };
-
-        if !should_show {
-            continue;
-        }
-
-        // Add space between words (except first)
-        if !first_word && current_width < content_width {
-            queue!(
-                stdout,
-                SetBackgroundColor(line_bg),
-                Print(" "),
-            )?;
-            current_width += 1;
-        }
-        first_word = false;
-
-        // Determine word background
-        let word_bg = match word.change_type {
-            ChangeType::Unchanged => line_bg,
-            ChangeType::Added => word_added_bg,
-            ChangeType::Removed => word_removed_bg,
-        };
-
-        // Print word with appropriate background
-        // Use truncate_to_width for proper wide character handling
-        use crate::text::truncate_to_width;
-        let remaining_width = content_width.saturating_sub(current_width);
-        let text_to_print = truncate_to_width(&word.text, remaining_width);
-
-        queue!(
-            stdout,
-            SetBackgroundColor(word_bg),
-            Print(&text_to_print),
-        )?;
-        current_width += text_to_print.width();
     }
 
-    // Padding
-    let padding = content_width.saturating_sub(current_width);
-    if padding > 0 {
-        queue!(
-            stdout,
-            SetBackgroundColor(line_bg),
-            Print(format!("{:width$}", "", width = padding)),
-        )?;
-    }
-
-    Ok(())
+    change_positions
 }
 
 /// Render annotation area in diff mode.
@@ -861,7 +1100,7 @@ fn render_diff_status_bar(
             }
 
             // Continue with the rest of the shortcuts
-            let shortcuts = " ^G Help  ^X Exit  ^O Save  ^W Search  ^T Theme  Del/Bksp Del  ^N/^P Jump";
+            let shortcuts = " F1 Help  ^X Exit  ^O Save  ^W Search  ^T Theme  Del/Bksp Del  ^N/^P Jump";
             let current_len = left_part.len() + if diff_available { 15 } else { 0 }; // " " + " ^D Exit Diff "
             let remaining_width = (width as usize).saturating_sub(current_len + 1);
             let shortcuts_truncated: String = shortcuts.chars().take(remaining_width).collect();
@@ -1063,11 +1302,13 @@ fn render_diff_help_overlay(
         " ^T         Toggle Theme",
         " ^O         Save File",
         " ^X         Exit",
-        " ^G         Toggle Help",
+        " F1         Show Help",
+        " ^Z / ^Y    Undo / Redo",
         "",
         " Arrow Keys Navigation",
         " PgUp/PgDn  Page Navigation",
         "",
+        " Hotkeys work in EN/RU layouts",
         " Press Any Key to Close",
     ];
 
@@ -1323,4 +1564,253 @@ mod diff_title_tests {
         assert_eq!(bottom_middle, '┴');
         assert_eq!(vertical, '│');
     }
+
+    #[test]
+    fn test_word_diff_wrapping_with_syntax_highlighting() {
+        use crate::diff::{ChangeType, LineChange, WordChange};
+        use crate::highlighting::SyntaxHighlighter;
+        use crate::models::Line;
+        use crate::theme::Theme;
+
+        // Test that word-level diffs preserve syntax highlighting for unchanged words
+        let content = "adjust_scroll(*cursor,scroll,lines,view_mode)?;";
+
+        // Create a mock modified line with word changes
+        let words = vec![
+            WordChange { text: "adjust_scroll".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "(".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "*".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "cursor".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: ",".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "scroll".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: ",".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "lines".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: ",".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "view_mode".to_string(), change_type: ChangeType::Added },
+            WordChange { text: ")".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "?".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: ";".to_string(), change_type: ChangeType::Unchanged },
+        ];
+
+        let change = LineChange::Modified {
+            words,
+            old_leading_ws: "".to_string(),
+            new_leading_ws: "".to_string(),
+        };
+
+        // Create test data
+        let lines = vec![Line { content: content.to_string(), annotation: None }];
+        let colors = Theme::Dark.colors();
+        let highlighter = SyntaxHighlighter::new(true);
+
+        // Test wrapping function
+        let wrapped = super::wrap_diff_pane_content(
+            &Some((1, content.to_string(), change)),
+            40, // content_width
+            4,  // gutter_width
+            true, // is_left_pane
+            &colors,
+            &highlighter,
+            "rs",
+            &lines,
+            false, // is_cursor_line
+        );
+
+        // Should produce at least one wrapped line
+        assert!(!wrapped.is_empty(), "Should produce wrapped lines");
+
+        // Each wrapped line should have styled segments
+        for wrapped_line in &wrapped {
+            // If there are segments, verify they have both fg and bg colors
+            if !wrapped_line.styled_segments.is_empty() {
+                for (_fg, _bg, text) in &wrapped_line.styled_segments {
+                    assert!(!text.is_empty(), "Segment should have text");
+                }
+            }
+        }
+
+        // Verify the output contains the added word
+        let all_text: String = wrapped.iter()
+            .flat_map(|line| &line.styled_segments)
+            .map(|(_, _, text)| text.as_str())
+            .collect();
+        assert!(all_text.contains("view_mode"), "Should contain added word 'view_mode'");
+    }
+
+    #[test]
+    fn test_word_diff_right_pane_colors() {
+        use crate::diff::{ChangeType, LineChange, WordChange};
+        use crate::highlighting::SyntaxHighlighter;
+        use crate::models::Line;
+        use crate::theme::Theme;
+
+        // Test that right pane (HEAD) uses correct colors for removed words
+        let content = "foo bar baz";
+
+        // Create a mock modified line - right pane should show "bar" as removed
+        let words = vec![
+            WordChange { text: "foo".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "bar".to_string(), change_type: ChangeType::Removed },
+            WordChange { text: "baz".to_string(), change_type: ChangeType::Unchanged },
+        ];
+
+        let change = LineChange::Modified {
+            words,
+            old_leading_ws: "".to_string(),
+            new_leading_ws: "".to_string(),
+        };
+
+        let lines = vec![Line { content: content.to_string(), annotation: None }];
+        let colors = Theme::Dark.colors();
+        let highlighter = SyntaxHighlighter::new(true);
+
+        // Test wrapping for right pane
+        let wrapped = super::wrap_diff_pane_content(
+            &Some((1, content.to_string(), change)),
+            40,
+            4,
+            false, // is_left_pane = false (this is HEAD/right pane)
+            &colors,
+            &highlighter,
+            "txt",
+            &lines,
+            false,
+        );
+
+        assert!(!wrapped.is_empty(), "Right pane should produce wrapped lines");
+
+        // Verify that segments exist
+        let total_segments: usize = wrapped.iter()
+            .map(|line| line.styled_segments.len())
+            .sum();
+        assert!(total_segments > 0, "Right pane should have styled segments");
+
+        // Verify "bar" is included (it's removed, should show on right pane)
+        let all_text: String = wrapped.iter()
+            .flat_map(|line| &line.styled_segments)
+            .map(|(_, _, text)| text.as_str())
+            .collect();
+        assert!(all_text.contains("bar"), "Right pane should contain removed word 'bar'");
+    }
+
+    #[test]
+    fn test_word_diff_added_word_highlighting() {
+        use crate::diff::{ChangeType, LineChange, WordChange};
+        use crate::highlighting::SyntaxHighlighter;
+        use crate::models::Line;
+        use crate::theme::Theme;
+
+        // Test that added words get special background color
+        let content = "foo bar baz";
+
+        // Create a mock modified line with "baz" added
+        let words = vec![
+            WordChange { text: "foo".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "bar".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "baz".to_string(), change_type: ChangeType::Added },
+        ];
+
+        let change = LineChange::Modified {
+            words,
+            old_leading_ws: "".to_string(),
+            new_leading_ws: "".to_string(),
+        };
+
+        let lines = vec![Line { content: content.to_string(), annotation: None }];
+        let colors = Theme::Dark.colors();
+        let highlighter = SyntaxHighlighter::new(true);
+
+        // Test wrapping
+        let wrapped = super::wrap_diff_pane_content(
+            &Some((1, content.to_string(), change)),
+            40,
+            4,
+            true, // is_left_pane
+            &colors,
+            &highlighter,
+            "txt",
+            &lines,
+            false,
+        );
+
+        // Verify wrapped lines contain the added word
+        let all_text: String = wrapped.iter()
+            .flat_map(|line| &line.styled_segments)
+            .map(|(_, _, text)| text.as_str())
+            .collect();
+        assert!(all_text.contains("baz"), "Wrapped output should contain 'baz'");
+
+        // Verify "baz" has a special background (added word background)
+        let has_added_bg = wrapped.iter()
+            .flat_map(|line| &line.styled_segments)
+            .any(|(_, bg, text)| text.contains("baz") && *bg == colors.diff_added_word_bg);
+        assert!(has_added_bg, "Added word 'baz' should have special background color");
+    }
+
+    #[test]
+    fn test_word_diff_preserves_spacing_after_commas() {
+        use crate::diff::{ChangeType, LineChange, WordChange};
+        use crate::highlighting::SyntaxHighlighter;
+        use crate::models::Line;
+        use crate::theme::Theme;
+
+        // Bug reproduction: spacing after commas should be preserved
+        let _old_content = "use crate::diff::{ChangeType,DiffResult,LineChange};";
+        let new_content = "use crate::diff::{ChangeType, DiffResult, LineChange};";
+
+        // Simulate word-level diff (spaces added after commas)
+        let words = vec![
+            WordChange { text: "use".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "crate".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "::".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "diff".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "::".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "{".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "ChangeType".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: ",".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "DiffResult".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: ",".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "LineChange".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: "}".to_string(), change_type: ChangeType::Unchanged },
+            WordChange { text: ";".to_string(), change_type: ChangeType::Unchanged },
+        ];
+
+        let change = LineChange::Modified {
+            words,
+            old_leading_ws: "".to_string(),
+            new_leading_ws: "".to_string(),
+        };
+
+        let lines = vec![Line { content: new_content.to_string(), annotation: None }];
+        let colors = Theme::Dark.colors();
+        let highlighter = SyntaxHighlighter::new(true);
+
+        // Test wrapping for left pane (new version)
+        let wrapped = super::wrap_diff_pane_content(
+            &Some((1, new_content.to_string(), change)),
+            80,
+            4,
+            true, // is_left_pane
+            &colors,
+            &highlighter,
+            "rs",
+            &lines,
+            false,
+        );
+
+        // Reconstruct text from segments
+        let rendered_text: String = wrapped.iter()
+            .flat_map(|line| &line.styled_segments)
+            .map(|(_, _, text)| text.as_str())
+            .collect();
+
+        // The rendered text should preserve spacing: "{ChangeType, DiffResult, LineChange}"
+        // not "{ChangeType,DiffResult,LineChange}"
+        assert!(
+            rendered_text.contains("{ChangeType, DiffResult, LineChange}"),
+            "Spacing after commas should be preserved. Got: {}",
+            rendered_text
+        );
+    }
 }
+

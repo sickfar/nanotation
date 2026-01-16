@@ -49,6 +49,7 @@ pub fn handle_idle_mode(
     theme: &mut crate::theme::Theme,
     annotation_scroll: &mut usize,
     scroll_offset: &mut usize,
+    content_height: usize,
 ) -> io::Result<IdleModeResult> {
     // Check Ctrl+char hotkeys with multi-layout support first
     // Quit (Ctrl+X): English 'x', Russian 'ч'
@@ -91,7 +92,7 @@ pub fn handle_idle_mode(
         if let Some(next) = find_next_annotation(lines, *cursor_line) {
             *cursor_line = next;
             *annotation_scroll = 0;
-            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
         }
         return Ok(IdleModeResult::Continue);
     }
@@ -100,7 +101,7 @@ pub fn handle_idle_mode(
         if let Some(prev) = find_prev_annotation(lines, *cursor_line) {
             *cursor_line = prev;
             *annotation_scroll = 0;
-            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
         }
         return Ok(IdleModeResult::Continue);
     }
@@ -119,26 +120,22 @@ pub fn handle_idle_mode(
         }
         // Page Up
         (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => {
-            let (_, height) = terminal::size()?;
-            let content_height = (height.saturating_sub(5)) as usize;
             *cursor_line = cursor_line.saturating_sub(content_height);
             *annotation_scroll = 0;
-            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
         }
         // Page Down
         (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => {
-            let (_, height) = terminal::size()?;
-            let content_height = (height.saturating_sub(5)) as usize;
             *cursor_line = (*cursor_line + content_height).min(lines.len().saturating_sub(1));
             *annotation_scroll = 0;
-            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
         }
         // Up arrow
         (KeyCode::Up, _) => {
             if *cursor_line > 0 {
                 *cursor_line -= 1;
                 *annotation_scroll = 0;
-                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
             }
         }
         // Down arrow
@@ -146,7 +143,7 @@ pub fn handle_idle_mode(
             if *cursor_line < lines.len().saturating_sub(1) {
                 *cursor_line += 1;
                 *annotation_scroll = 0;
-                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
             }
         }
         // Enter annotation mode
@@ -172,9 +169,9 @@ fn adjust_scroll_unified(
     scroll_offset: &mut usize,
     lines: &[Line],
     view_mode: &ViewMode,
+    content_height: usize,
 ) -> io::Result<()> {
-    let (width, height) = terminal::size().unwrap_or((80, 24));
-    let content_height = (height.saturating_sub(5)) as usize;
+    let (width, _) = terminal::size().unwrap_or((80, 24));
 
     match view_mode {
         ViewMode::Diff { diff_result } => {
@@ -244,6 +241,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
         assert_eq!(cursor_line, 1);
@@ -257,6 +255,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
         assert_eq!(cursor_line, 3);
@@ -270,6 +269,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
         assert_eq!(cursor_line, 3);
@@ -315,6 +315,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
         assert_eq!(cursor_line, 1);
@@ -340,6 +341,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -368,6 +370,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -395,6 +398,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -421,6 +425,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -447,6 +452,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -476,6 +482,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -502,6 +509,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -528,6 +536,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -565,6 +574,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -599,6 +609,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -632,6 +643,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -668,6 +680,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -701,6 +714,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -734,6 +748,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -766,6 +781,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -786,6 +802,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -824,6 +841,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -861,6 +879,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -887,6 +906,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -901,6 +921,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 
@@ -924,6 +945,7 @@ mod tests {
             &mut theme,
             &mut annotation_scroll,
             &mut scroll_offset,
+            50,
         )
         .unwrap();
 

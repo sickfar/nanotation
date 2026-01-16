@@ -358,6 +358,12 @@ impl Editor {
         loop {
             // Check terminal width when file tree is present
             let (width, height) = terminal::size()?;
+
+            // Calculate content height (accounts for annotation area, status bar, title bar, and bottom border)
+            let title_bar_height = if self.file_tree.is_some() { 1 } else { 0 };
+            let editor_border_height = if self.file_tree.is_some() { 1 } else { 0 };
+            let content_height = (height.saturating_sub(5 + title_bar_height + editor_border_height)) as usize;
+
             if self.file_tree.is_some() && width < ui_tree::MIN_WIDTH_WITH_TREE {
                 // Terminal too narrow for tree mode
                 execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen, Show)?;
@@ -515,6 +521,7 @@ impl Editor {
                             &mut self.theme,
                             &mut self.annotation_scroll,
                             &mut self.scroll_offset,
+                            content_height,
                         )? {
                             event_handler::IdleModeResult::Exit => break,
                             event_handler::IdleModeResult::ShowQuitPrompt => {
@@ -613,6 +620,7 @@ impl Editor {
                             &mut self.cursor_line,
                             &mut self.scroll_offset,
                             &self.view_mode,
+                            content_height,
                         )? {
                             event_handler::SearchModeResult::Exit => {
                                 self.editor_state = EditorState::Idle;

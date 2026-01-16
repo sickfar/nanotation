@@ -1129,6 +1129,7 @@ fn render_help_overlay(
         " ^W         Search",
         " ^D         Toggle Diff View",
         " ^T         Toggle Theme",
+        " ^Z / ^Y    Undo / Redo",
         " ^O         Save File",
         " ^X         Exit",
         " F1         Show Help",

@@ -23,6 +23,8 @@ pub struct ColorScheme {
     pub diff_removed_bg: Color,
     pub diff_added_word_bg: Color,
     pub diff_removed_word_bg: Color,
+    pub diff_added_word_fg: Color,
+    pub diff_removed_word_fg: Color,
     // Diff cursor colors (when cursor is on a diff line)
     pub diff_added_selected_bg: Color,
     pub diff_removed_selected_bg: Color,
@@ -87,7 +89,7 @@ impl Theme {
                     g: 30,
                     b: 30,
                 },
-                // Word-level highlights - brighter
+                // Word-level highlights - brighter backgrounds
                 diff_added_word_bg: Color::Rgb {
                     r: 50,
                     g: 100,
@@ -97,6 +99,17 @@ impl Theme {
                     r: 100,
                     g: 50,
                     b: 50,
+                },
+                // Word-level highlights - bright foreground colors
+                diff_added_word_fg: Color::Rgb {
+                    r: 100,
+                    g: 255,
+                    b: 100,
+                },
+                diff_removed_word_fg: Color::Rgb {
+                    r: 255,
+                    g: 100,
+                    b: 100,
                 },
                 // Cursor on diff line - blend added/removed with selection
                 diff_added_selected_bg: Color::Rgb {
@@ -226,7 +239,7 @@ impl Theme {
                     g: 220,
                     b: 220,
                 },
-                // Word-level highlights - more saturated
+                // Word-level highlights - more saturated backgrounds
                 diff_added_word_bg: Color::Rgb {
                     r: 180,
                     g: 255,
@@ -236,6 +249,17 @@ impl Theme {
                     r: 255,
                     g: 180,
                     b: 180,
+                },
+                // Word-level highlights - bright foreground colors
+                diff_added_word_fg: Color::Rgb {
+                    r: 0,
+                    g: 150,
+                    b: 0,
+                },
+                diff_removed_word_fg: Color::Rgb {
+                    r: 180,
+                    g: 0,
+                    b: 0,
                 },
                 // Cursor on diff line - blend added/removed with selection
                 diff_added_selected_bg: Color::Rgb {

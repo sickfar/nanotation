@@ -29,20 +29,21 @@ pub fn handle_search_input(
     cursor_line: &mut usize,
     scroll_offset: &mut usize,
     view_mode: &ViewMode,
+    content_height: usize,
 ) -> io::Result<SearchModeResult> {
     match (key.code, key.modifiers) {
         (KeyCode::Enter, KeyModifiers::SHIFT) => {
             // Shift+Enter: previous match
             if !search_matches.is_empty() {
                 prev_search_match(search_matches, current_match, cursor_line);
-                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
             }
         }
         (KeyCode::Enter, _) => {
             // Enter: next match
             if !search_matches.is_empty() {
                 next_search_match(search_matches, current_match, cursor_line);
-                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
             }
         }
         (KeyCode::Esc, _) => {
@@ -54,14 +55,14 @@ pub fn handle_search_input(
             query.insert(*cursor_pos, c);
             *cursor_pos += 1;
             perform_search(query, lines, search_matches, current_match, cursor_line);
-            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+            adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
         }
         (KeyCode::Backspace, _) => {
             if *cursor_pos > 0 {
                 *cursor_pos -= 1;
                 query.remove(*cursor_pos);
                 perform_search(query, lines, search_matches, current_match, cursor_line);
-                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode)?;
+                adjust_scroll_unified(*cursor_line, scroll_offset, lines, view_mode, content_height)?;
             }
         }
         _ => {}
@@ -117,9 +118,9 @@ fn adjust_scroll_unified(
     scroll_offset: &mut usize,
     lines: &[Line],
     view_mode: &ViewMode,
+    content_height: usize,
 ) -> io::Result<()> {
-    let (width, height) = terminal::size().unwrap_or((80, 24));
-    let content_height = (height.saturating_sub(5)) as usize;
+    let (width, _) = terminal::size().unwrap_or((80, 24));
 
     match view_mode {
         ViewMode::Diff { diff_result } => {
@@ -171,6 +172,7 @@ mod tests {
             &mut cursor_line,
             &mut scroll_offset,
             &view_mode,
+            50,
         )
         .unwrap();
 
@@ -203,6 +205,7 @@ mod tests {
             &mut cursor_line,
             &mut scroll_offset,
             &view_mode,
+            50,
         )
         .unwrap();
 
@@ -245,6 +248,7 @@ mod tests {
             &mut cursor_line,
             &mut scroll_offset,
             &view_mode,
+            50,
         )
         .unwrap();
 
